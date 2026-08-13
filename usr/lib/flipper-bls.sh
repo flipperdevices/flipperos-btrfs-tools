@@ -9,6 +9,9 @@
 # The kernel/initrd staging and devicetree(dir) handling are derived from systemd's
 # 90-loaderentry.install (LGPL-2.1-or-later).
 
+[ -r /usr/lib/flipper-rootinfo.sh ] || { echo "flipper-bls: /usr/lib/flipper-rootinfo.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-rootinfo.sh
+
 VENDOR=rockchip
 TITLE_MAX="${FLIPPER_TITLE_MAX:-26}"
 
@@ -78,20 +81,6 @@ fdt_prefix() {  # $1 = options string -> "/<rootflags-subvol>" (or $FDT_SUBVOL_P
     _sv=$(subvol_of "$1")
     [ -n "$_sv" ] && printf '/%s' "$_sv"
     return 0
-}
-
-# Copies of flipper-btrfs.sh's booted_subvol/booted_fsuuid, kept byte-identical: kernel-install
-# sources this file without that one, so it needs its own. Keep the bodies in sync with it.
-booted_subvol() {
-    _cs=$(findmnt -nro FSROOT / 2>/dev/null | sed 's,^/,,')
-    [ -n "$_cs" ] || _cs=$(btrfs subvolume show / 2>/dev/null | sed -n '1{s,^/*,,;s,[[:space:]]*$,,;p}')
-    printf '%s' "$_cs"
-}
-
-booted_fsuuid() {
-    _fu=$(findmnt -nro UUID / 2>/dev/null)
-    [ -n "$_fu" ] || _fu=$(btrfs filesystem show / 2>/dev/null | sed -n 's/.*[[:space:]]uuid:[[:space:]]*//p' | head -1)
-    printf '%s' "$_fu"
 }
 
 # Remove loader entries whose options select SUBVOL and whose version == VERSION. Content-based

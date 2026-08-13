@@ -39,9 +39,9 @@ no entry, and the image build itself sources `usr/lib/flipper-bls.sh` to fan out
 the menu bands and session of each profile. That file describes a particular image's profiles, so it
 ships from flipperone-linux-build-scripts, not from here.
 
-`flipper-bls.sh` keeps its own copies of `booted_subvol` and `booted_fsuuid` from `flipper-btrfs.sh`,
-byte-identical on purpose: kernel-install sources the one file without the other. Change one, change
-both.
+`booted_subvol` and `booted_fsuuid` live in `usr/lib/flipper-rootinfo.sh`, which both libs source.
+Both need them and neither can source the other, so the pair has its own file; it must stay free of
+any dependency on either lib.
 
 ## Runtime dependencies
 

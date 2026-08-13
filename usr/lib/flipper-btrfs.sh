@@ -9,6 +9,9 @@
 # btrfs-maintenance, receive-snapshot, rename-profile, send-snapshot, migrate-profile and btrfs-show-space.
 # Functions read globals lazily, so callers set what they need first.
 
+[ -r /usr/lib/flipper-rootinfo.sh ] || { echo "Error: /usr/lib/flipper-rootinfo.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-rootinfo.sh
+
 die() { echo "Error: $*" >&2; exit 1; }
 
 need_root()  { [ "$(id -u)" -eq 0 ] || die "Must run as root (use sudo)"; }
@@ -21,22 +24,6 @@ need_device_arg() { [ "$1" -ge 1 ] || { echo "Error: --device needs an argument"
 
 # True if / is a btrfs mount (a normally booted system, not a RAM recovery root).
 root_is_btrfs() { [ "$(findmnt -no FSTYPE / 2>/dev/null)" = btrfs ]; }
-
-# The subvolume mounted at / (e.g. @Desktop), empty if there is none. findmnt cannot answer inside a
-# chroot, so fall back to asking btrfs. flipper-bls.sh keeps its own copy: kernel-install hooks
-# source that file without this one.
-booted_subvol() {
-    _cs=$(findmnt -nro FSROOT / 2>/dev/null | sed 's,^/,,')
-    [ -n "$_cs" ] || _cs=$(btrfs subvolume show / 2>/dev/null | sed -n '1{s,^/*,,;s,[[:space:]]*$,,;p}')
-    printf '%s' "$_cs"
-}
-
-# btrfs FS UUID of the mounted root, empty if unknown. Same reasoning as booted_subvol.
-booted_fsuuid() {
-    _fu=$(findmnt -nro UUID / 2>/dev/null)
-    [ -n "$_fu" ] || _fu=$(btrfs filesystem show / 2>/dev/null | sed -n 's/.*[[:space:]]uuid:[[:space:]]*//p' | head -1)
-    printf '%s' "$_fu"
-}
 
 # The two option help lines nearly every tool repeats verbatim in its usage(). Kept here so the
 # wording cannot drift between tools; interpolated inside their heredocs. migrate-profile spells

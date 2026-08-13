@@ -9,7 +9,8 @@
 #   delete-snapshot @snapshots/@SourceProfile_2026-06-29_19-52-31
 #   delete-snapshot @Desktop_694_stock            # a golden base under @stock-snapshots
 set -eu
-. /usr/lib/flipper-btrfs.sh 2>/dev/null || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+[ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-btrfs.sh
 
 usage() {
     cat <<EOF

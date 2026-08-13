@@ -7,7 +7,8 @@
 # is how a bad overlay gets removed from a profile that no longer boots (from a recovery boot).
 # There is no running kernel over there, so the default scope is that profile's newest.
 set -eu
-. /usr/lib/flipper-bls.sh 2>/dev/null || { echo "Error: /usr/lib/flipper-bls.sh not found" >&2; exit 1; }
+[ -r /usr/lib/flipper-bls.sh ] || { echo "Error: /usr/lib/flipper-bls.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-bls.sh
 DROPDIR="$OVERLAY_USER_PATH"   # the library owns the path; deriving keeps the two in step
 DROPSHOW="$DROPDIR"            # what we print: under -d the real path is a temp mountpoint
 
@@ -60,7 +61,8 @@ fi
 TOP=""
 if [ -n "$_dev" ] || [ -n "$_prof" ]; then
     [ -n "$_prof" ] || { echo "Error: -d/--device needs -p/--profile to say which profile" >&2; exit 1; }
-    . /usr/lib/flipper-btrfs.sh 2>/dev/null || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+    [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+    . /usr/lib/flipper-btrfs.sh
     need_root
     need_btrfs
     [ -n "$_dev" ] && ROOTDEV=$_dev

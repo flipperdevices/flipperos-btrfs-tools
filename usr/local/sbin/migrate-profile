@@ -24,7 +24,8 @@
 # migrate first) and then, if any conflicts remain, drops straight into interactive resolution
 # unless --do-not-resolve is given. --resolve walks a profile's leftover conflict sidecars later.
 set -eu
-. /usr/lib/flipper-btrfs.sh 2>/dev/null || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+[ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-btrfs.sh
 
 usage() {
     cat <<EOF

@@ -11,7 +11,8 @@
 # Example:
 #   btrfs-maintenance all   # scrub + dedup + balance across all writable subvols
 set -eu
-. /usr/lib/flipper-btrfs.sh 2>/dev/null || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+[ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-btrfs.sh
 
 usage() {
     cat <<EOF

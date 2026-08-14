@@ -8,7 +8,7 @@ onto its counterpart in the target without rearranging anything.
 
 ```
 usr/local/sbin/         the tools, all POSIX sh, all with -h/--help
-usr/lib/                shared libraries, sourced by the tools and by kernel-install
+usr/lib/                shared libraries, sourced by the tools and by kernel-install, plus one awk helper
 etc/kernel/install.d/   kernel-install plugins, run when a kernel package is installed or removed
 ```
 
@@ -42,6 +42,11 @@ ships from flipperone-linux-build-scripts, not from here.
 `booted_subvol` and `booted_fsuuid` live in `usr/lib/flipper-rootinfo.sh`, which both libs source.
 Both need them and neither can source the other, so the pair has its own file; it must stay free of
 any dependency on either lib.
+
+`usr/lib/flipper-accountdb.awk` is `migrate-profile`'s per-entry merge of `passwd`, `shadow`, `group`
+and `gshadow`, run with `awk -f` rather than sourced. Without it, or whenever its result does not
+look like an account database, `migrate-profile` keeps the target's copy and leaves the user's as a
+`.migrate-theirs` sidecar.
 
 ## Runtime dependencies
 

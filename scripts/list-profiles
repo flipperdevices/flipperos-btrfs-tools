@@ -1,9 +1,10 @@
 #!/bin/sh
 # list-profiles - list the bootable PROFILES at the btrfs top level: the profile roots
 # (@Desktop, @Minimal, ...) and @<profile>_old_* leftovers from create-profile. KIND tags each
-# (profile/old); PARENT is what it was snapshotted from (via Parent UUID). Names are top-level
-# paths (what create-profile/rename-profile/delete-profile take). The booted profile is marked
-# <- booted. LAST USED is when the profile last RAN: 'now' for the running one, 'never' if never.
+# (profile/old); PARENT is what it was snapshotted from (via Parent UUID); ORIGIN is the _stock
+# base it was built from (origin_stock_name from /etc/profile_origin, '-' if none). Names are
+# top-level paths (what create-profile/rename-profile/delete-profile take). The booted profile is
+# marked <- booted. LAST USED is when the profile last RAN: 'now' for the running one, 'never' if never.
 # For _stock golden bases and restore points, see list-snapshots.
 # Works via a subvolid=5 (top-level) mount.
 #
@@ -83,6 +84,10 @@ emit() {  # $1=display name  $2=fs path
         *)       kind=profile ;;
     esac
     mark=""; is_running_id "$id" "$cur_id" && mark="<- booted"
+    # the _stock base this profile was built from, as recorded at build time; the exact name
+    # (with build id) that Factory Reset restores from and that identifies its origin
+    origin=$(sed -n 's/^origin_stock_name=//p' "$2/etc/profile_origin" 2>/dev/null | head -n1)
+    [ -n "$origin" ] || origin="-"
     # convert while the "+0000" btrfs prints is still there: date -d without a zone assumes the
     # reader's, which shifts the epoch whenever that differs from the zone the profile was made in
     oepoch=$(date -d "$otime" +%s 2>/dev/null || echo "")
@@ -90,10 +95,10 @@ emit() {  # $1=display name  $2=fs path
     # the profile we are running from writes its state at boot and then only now and then, so a
     # timestamp here would read as stale for the one profile that is definitely in use
     if [ -n "$mark" ]; then lu=now; else lu=$(last_used "$2" "$oepoch"); fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$mark" "$kind" "${id:-?}" "${otime:-?}" "$lu" "$flags" "$parent" >> "$rows"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$mark" "$kind" "${id:-?}" "${otime:-?}" "$lu" "$flags" "$parent" "$origin" >> "$rows"
 }
 
-printf 'NAME\t\tKIND\tID\tCREATED\tLAST USED\tRO\tPARENT\n' > "$rows"
+printf 'NAME\t\tKIND\tID\tCREATED\tLAST USED\tRO\tPARENT\tORIGIN\n' > "$rows"
 # top-level profile roots + @_old_* leftovers; skip shared/reserved subvols (@snapshots,
 # @stock-snapshots, ...) so stocks (now nested under @stock-snapshots) are not listed here
 for d in "$TOP"/@*; do

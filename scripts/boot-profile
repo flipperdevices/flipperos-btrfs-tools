@@ -1,0 +1,105 @@
+#!/bin/sh
+# boot-profile <@profile> - kexec directly into a bootable PROFILE (as listed by list-profiles),
+# skipping the firmware/U-Boot cycle. Reads the profile's BLS entry for the kernel, initrd and
+# cmdline; assembles its device tree (the booted profile's is the live one, any other profile's is
+# the board base dtb + the entry's overlays via fdtoverlay); loads it with kexec and hands over
+# with `systemctl kexec` (clean shutdown, nothing reserved). --dry-run loads then unloads instead.
+set -eu
+[ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-btrfs.sh
+
+usage() {
+    cat <<EOF
+Usage: boot-profile [--dry-run] [-d|--device DEV] <@profile>
+  kexec into the profile: load its BLS kernel/initrd/dtb, then hand over via systemctl kexec.
+  --dry-run   assemble + load with kexec, then unload: validates without rebooting
+$HELP_DEVICE
+EOF
+}
+
+dry=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)   dry=1 ;;
+        -d|--device) shift; need_device_arg "$#"; ROOTDEV=$1 ;;
+        --device=*)  ROOTDEV=${1#*=} ;;
+        -h|--help)   usage; exit 0 ;;
+        --)          shift; break ;;
+        -?*)         echo "Error: unknown option: $1" >&2; usage >&2; exit 1 ;;
+        *)           break ;;
+    esac
+    shift
+done
+[ $# -ge 1 ] || { usage >&2; exit 1; }
+arg=$1
+case "$arg" in *..*|/*) die "Invalid name: $arg" ;; esac
+
+need_root
+command -v kexec     >/dev/null 2>&1 || die "kexec not installed (kexec-tools)"
+command -v fdtoverlay >/dev/null 2>&1 || die "fdtoverlay not installed"
+
+ENTRIES=/boot/loader/entries
+# newest entry (highest kernel version sorts last) whose cmdline mounts this subvol
+entry=$(grep -lE "rootflags=subvol=$arg( |\$)" "$ENTRIES"/*.conf 2>/dev/null | sort | tail -n1)
+[ -n "$entry" ] || die "No boot entry for $arg (see list-profiles)"
+val() { sed -n "s/^$1[[:space:]]\{1,\}//p" "$entry" | head -n1; }
+K_REL=$(val linux); I_REL=$(val initrd); OPTS=$(val options)
+DT_REL=$(val devicetree); DTDIR_REL=$(val devicetreedir); OVL_REL=$(val devicetree-overlay)
+[ -n "$K_REL" ]  || die "boot entry has no 'linux' line"
+[ -n "$OPTS" ]   || die "boot entry has no 'options' line"
+
+# BLS paths are top-level (/@X/...); read them under a subvolid=5 mount so this works for any
+# profile, booted or not.
+mount_top
+K="$TOP$K_REL"; I="$TOP$I_REL"
+[ -f "$K" ] || die "kernel not found: $K_REL"
+[ -z "$I_REL" ] || [ -f "$I" ] || die "initrd not found: $I_REL"
+
+DTB=$(mktemp /tmp/boot-profile.XXXXXX.dtb); TOP_TMPFILES="${TOP_TMPFILES:-} $DTB"
+booted=$(findmnt -no FSROOT / 2>/dev/null); booted=${booted#/}
+if [ "$arg" = "$booted" ] && [ -r /sys/firmware/fdt ]; then
+    # the running profile: reuse the live, fully-assembled tree
+    cat /sys/firmware/fdt > "$DTB"
+else
+    # base board dtb, chosen from the running board's first compatible
+    # (e.g. "flipper,one-rev-f0b0c1" -> rk3576-flipper-one-rev-f0b0c1.dtb)
+    if [ -n "$DT_REL" ]; then
+        base="$TOP$DT_REL"
+    else
+        comp=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
+        board=$(printf '%s' "$comp" | tr ',' '-')
+        base="$TOP$DTDIR_REL/rockchip/rk3576-$board.dtb"
+    fi
+    [ -f "$base" ] || die "base device tree not found: ${base#$TOP}"
+    ovl=""
+    for o in $OVL_REL; do ovl="$ovl $TOP$o"; done
+    if [ -n "$ovl" ]; then
+        fdtoverlay -i "$base" -o "$DTB" $ovl || die "fdtoverlay failed to apply overlays"
+    else
+        cp "$base" "$DTB"
+    fi
+fi
+
+# --kexec-syscall, or the tree assembled above is thrown away. kexec-tools defaults to
+# kexec_file_load, and on that path arm64 discards a user-supplied dtb on purpose --
+# `if (do_kexec_file_syscall) arm64_opts.dtb = NULL;` -- because the kernel builds the new
+# tree from the running one. The old syscall runs the arm64 purgatory, which loads our dtb as
+# a segment and enters the kernel with its address in x0.
+#
+# --no-checks with it, because that purgatory otherwise SHA-256s every segment before it
+# branches: measured on this board, 12 of the 13.5 seconds between "Starting new kernel" and
+# the new kernel's first console line, for 42MB of kernel and initrd. The digest is worth
+# paying for a crash kernel loaded hours in advance; here the same tool wrote those segments
+# milliseconds ago on a machine that is about to jump into them, with no firmware handoff and
+# nothing else running in between.
+kexec --kexec-syscall --no-checks -l "$K" ${I_REL:+--initrd="$I"} --dtb="$DTB" --command-line="$OPTS" \
+    || die "kexec load failed"
+
+if [ "$dry" = 1 ]; then
+    kexec --kexec-syscall -u 2>/dev/null || true
+    echo "boot-profile: $arg loaded OK and unloaded (dry run)"
+    exit 0
+fi
+
+echo "boot-profile: kexec into $arg, handing over with systemctl kexec"
+exec systemctl kexec

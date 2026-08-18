@@ -77,7 +77,11 @@ if [ -n "$target" ]; then
     measure "$TOP/$target"
     printf 'TOTAL=%s\n'  "$(human "$M_TOT")"
     printf 'UNIQUE=%s\n' "$(human "$M_EXC")"
-    if [ "$have_cs" = 1 ]; then printf 'REFERENCED=%s\n' "$(human "$M_REF")"; fi
+    if [ "$have_cs" = 1 ]; then
+        printf 'REFERENCED=%s\n' "$(human "$M_REF")"
+        # compression factor: apparent (uncompressed) over on-disk (compressed)
+        awk -v t="$M_TOT" -v r="$M_REF" 'BEGIN { if (r+0 > 0) printf "COMPRESSION=%.2f\n", t/r }'
+    fi
     exit 0
 fi
 

@@ -87,7 +87,15 @@ emit() {  # $1=display name  $2=fs path
     # the _stock base this profile was built from, as recorded at build time; the exact name
     # (with build id) that Factory Reset restores from and that identifies its origin
     origin=$(sed -n 's/^origin_stock_name=//p' "$2/etc/profile_origin" 2>/dev/null | head -n1)
-    [ -n "$origin" ] || origin="-"
+    if [ -n "$origin" ]; then
+        # append the stock's subvolume id when it is on disk, like the PARENT column
+        if [ -e "$TOP/@stock-snapshots/$origin" ]; then
+            _oid=$(subvol_id "$TOP/@stock-snapshots/$origin" 2>/dev/null)
+            [ -n "$_oid" ] && origin="$origin ($_oid)"
+        fi
+    else
+        origin="-"
+    fi
     # convert while the "+0000" btrfs prints is still there: date -d without a zone assumes the
     # reader's, which shifts the epoch whenever that differs from the zone the profile was made in
     oepoch=$(date -d "$otime" +%s 2>/dev/null || echo "")

@@ -223,7 +223,10 @@ path_of_uuid() {
           if (uu==u){print p; exit} }'
 }
 
-human() { numfmt --to=iec-i --suffix=B --format='%.1f' "${1:-0}" 2>/dev/null || printf '%s' "${1:-0}"; }
+# A byte count for a person to read, in decimal: 1 GB is 10^9 bytes, which is what a
+# desktop's own system monitor and the sticker on the part both say. --to=iec would
+# divide by 1024 and still label the result GB, which is the conflation this avoids.
+human() { numfmt --to=si --suffix=B --format='%.1f' "${1:-0}" 2>/dev/null || printf '%s' "${1:-0}"; }
 
 # uuid -> "id <tab> path" for every subvolume, so parents resolve by UUID. $1 = top, $2 = out file.
 build_uuid_map() {

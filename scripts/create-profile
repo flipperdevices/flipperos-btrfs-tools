@@ -17,17 +17,33 @@
 # its boot entry is refreshed in place, so no duplicate is left behind). The result is always
 # writable, even when <@source> is read-only.
 #
+#   --no-keep delete that previous copy instead of keeping it, once the new <@dest> is in
+#             place. When <@dest> is the profile you are booted from, the running system is left
+#             on that copy, so dropping it needs --reboot; without it the copy is kept and named.
+#   --reboot  only with --no-keep on the booted profile: delete the root the running system is
+#             using and RESET the machine at once. Deleting a mounted subvolume detaches it, and
+#             a path that is not already in the dentry cache can no longer even be found, so
+#             nothing (reboot included) can be exec'd afterwards, and no path under that root
+#             resolves any more either, /proc and /dev included. The reset is therefore written to
+#             a descriptor opened BEFORE the delete: sync, remount read-only, reboot.
+#             Hard by nature: no clean shutdown, and recovery is the only way back if the new
+#             <@dest> does not boot.
+#
 # Examples:
 #   create-profile @snapshots/@SourceProfile @DestinationProfile      # writable copy -> new profile
 #   create-profile -m @snapshots/@SourceProfile @DestinationProfile   # MOVE (consume source, keep parent)
+#   create-profile --no-keep @DestinationProfile_stock @DestinationProfile   # reset, no _old_<ts> left
+#   create-profile --no-keep --reboot @DestinationProfile_stock current      # reset the BOOTED one, resets the box
 set -eu
 [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-btrfs.sh
 
 usage() {
     cat <<EOF
-Usage: create-profile [-m|--move] [-y|--yes] [-d|--device DEV] <@source> [<@dest>|current]
+Usage: create-profile [-m|--move] [--no-keep [--reboot]] [-y|--yes] [-d|--device DEV] <@source> [<@dest>|current]
   -m,--move   move <@source> into <@dest> (consume source, preserve parent_uuid)
+  --no-keep   delete the replaced <@dest> instead of keeping it as <@dest>_old_<ts>
+  --reboot    with --no-keep on the booted profile: drop the root in use and HARD RESET into it
 $HELP_YES
 $HELP_DEVICE
   <@source>   full path or bare name: @snapshots/<name>, @<profile>_<stamp>, @<profile>_stock
@@ -35,10 +51,29 @@ $HELP_DEVICE
 EOF
 }
 
+# Permit the sysrq operations the hard reset needs: 16 sync, 32 remount read-only, 128 reboot.
+# Runtime only, and the reset takes the change with it. Runs in the preflight, so it may still
+# exec; the mask is read with cat because dash's read builtin comes back with one byte and a
+# failure on a sysctl file.
+sysrq_arm() {
+    [ -w /proc/sysrq-trigger ] || return 1
+    _sq=$(cat /proc/sys/kernel/sysrq 2>/dev/null) || return 1
+    case "$_sq" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_sq" = 1 ] && return 0
+    [ $((_sq & 176)) -eq 176 ] && return 0
+    printf '%s\n' "$((_sq | 176))" > /proc/sys/kernel/sysrq 2>/dev/null || return 1
+    _sq=$(cat /proc/sys/kernel/sysrq 2>/dev/null) || return 1
+    [ $((_sq & 176)) -eq 176 ]
+}
+
 move=0
+keep=1
+reboot=0
 while :; do
     case "${1:-}" in
         -m|--move)   move=1; shift ;;
+        --no-keep)   keep=0; shift ;;
+        --reboot)    reboot=1; shift ;;
         -y|--yes)    ASSUME_YES=1; shift ;;
         -d|--device) shift; need_device_arg "$#"; ROOTDEV=$1; shift ;;
         --device=*)  ROOTDEV=${1#*=}; shift ;;
@@ -48,6 +83,7 @@ while :; do
     esac
 done
 [ $# -ge 1 ] || { usage >&2; exit 1; }
+[ "$reboot" = 0 ] || [ "$keep" = 0 ] || { echo "Error: --reboot needs --no-keep" >&2; usage >&2; exit 1; }
 
 need_root
 need_btrfs
@@ -91,10 +127,33 @@ if [ "$move" = 1 ]; then
 else
     how="with a writable copy of '$src_name'"
 fi
+# The copy the running system is left on can only be dropped if nothing has to run from it
+# afterwards, which means resetting the machine in the same breath (--reboot).
+discard=0
+hard_reset=0
+if [ "$keep" = 0 ] && [ "$existed" = 1 ]; then
+    if [ "$replacing_booted" = 0 ]; then
+        discard=1
+    elif [ "$reboot" = 1 ]; then
+        discard=1; hard_reset=1
+    fi
+fi
+[ "$reboot" = 1 ] && [ "$hard_reset" = 0 ] && die "--reboot applies only with --no-keep when <@dest> is the profile you booted from; '$rel' is not (or does not exist yet)"
+# Refuse before anything changes: a delete we cannot follow with a reset strands the machine.
+[ "$hard_reset" = 1 ] && { sysrq_arm || die "Cannot arm sysrq (needs /proc/sysrq-trigger and kernel.sysrq bits 16|32|128); nothing changed"; }
+if [ "$hard_reset" = 1 ]; then
+    fate="$(printf "The current '%s' is DELETED and the machine RESET AT ONCE: it is the root you booted\nfrom, so there is no clean shutdown, whatever is unsaved is lost, and only recovery helps\nif the new '%s' does not boot." "$rel" "$rel")"
+elif [ "$discard" = 1 ]; then
+    fate="The current '$rel' is DELETED."
+elif [ "$keep" = 0 ]; then
+    fate="The current '$rel' is kept as ${rel}_old_<ts>: --no-keep needs --reboot to drop the root you booted from."
+else
+    fate="The current '$rel' is kept as ${rel}_old_<ts>."
+fi
 if [ "$existed" = 1 ]; then
-    confirm "$(printf "Replace existing profile '%s' %s on %s?\nThe current '%s' is kept as %s_old_<ts>.%s" \
-        "$rel" "$how" "$ROOTDEV" "$rel" "$rel" \
-        "$([ "$replacing_booted" = 1 ] && printf "\nThis is the profile you are booted from: the running system stays on the copy moved aside until you reboot.")")"
+    confirm "$(printf "Replace existing profile '%s' %s on %s?\n%s%s" \
+        "$rel" "$how" "$ROOTDEV" "$fate" \
+        "$([ "$replacing_booted" = 1 ] && [ "$hard_reset" = 0 ] && printf "\nThis is the profile you are booted from: the running system stays on the copy moved aside until you reboot.")")"
 else
     confirm "Create bootable profile '$rel' $how on $ROOTDEV?"
 fi
@@ -150,7 +209,48 @@ fi
 with_bls "boot entry not created for $rel" flipper_write_entry "$rel" "$tgt" "$src_rel"
 
 if [ "$move" = 1 ]; then verb="moved"; else verb="created"; fi
-if [ "$existed" = 1 ]; then
+
+# Point of no return, and it reports first: once $aside is gone the root this system runs from is
+# detached, and every path under it stops resolving, mountpoints included, so /dev/null, /run and
+# /proc all go with it. Writes to descriptors that are ALREADY open keep working, which is what
+# everything below is built on.
+if [ "$hard_reset" = 1 ]; then
+    echo "Profile '$rel' $verb from '$src_name' (writable)"
+    echo "Deleting the root this system is running from and resetting NOW."
+    exec 9>/proc/sysrq-trigger
+    sync
+    # top_cleanup would need umount and sleep, neither of which can be exec'd once the root is gone
+    trap - EXIT INT TERM HUP
+    # Delete from INSIDE the top-level mount, by a relative name: --commit-after re-resolves the
+    # path it was handed once the subvolume is gone, and an absolute one leads through the root
+    # that just went away. The cwd is a dentry of the $TOP mount, which is untouched by all this.
+    cd "$TOP" || die "Cannot enter $TOP; nothing deleted"
+    btrfs subvolume delete --commit-after "./${aside##*/}" >/dev/null || true
+    # Whatever happened, this still has to end in a reset: a system that cannot exec anything is
+    # worse off stranded than restarted, and the new profile is already in place.
+    echo s >&9
+    echo u >&9
+    echo b >&9
+    echo "Reset did not take: power-cycle now. The root this system was using is deleted, so" >&2
+    echo "nothing new can start here; '$rel' is in place and will boot." >&2
+    exit 1
+fi
+
+# Last, so the copy moved aside stays available as the fallback until the new profile is complete
+# (entry included). A failure here is not fatal: keeping it costs a leftover, losing it costs the
+# only copy of the profile being replaced.
+if [ "$discard" = 1 ]; then
+    if btrfs subvolume delete "$aside" >/dev/null; then
+        aside=""
+    else
+        echo "Warning: could not delete the previous copy ${aside##*/}; it is left in place" >&2
+    fi
+fi
+
+if [ "$existed" = 1 ] && [ -z "$aside" ]; then
+    echo "Profile '$rel' $verb from '$src_name' (writable); previous copy deleted"
+    echo "Reboot into '$rel' to use it"
+elif [ "$existed" = 1 ]; then
     echo "Profile '$rel' $verb from '$src_name' (writable); previous kept as ${aside##*/}"
     if [ "$replacing_booted" = 1 ]; then
         echo "WARNING: REBOOT REQUIRED. '$rel' is the profile you are booted from, so the running" >&2

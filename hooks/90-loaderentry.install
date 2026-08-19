@@ -96,6 +96,12 @@ if [ -f "$PROFILES" ]; then
         fi
     done <"$PROFILES"
 fi
-[ "$matched" = 1 ] || emit_entry "$(printf '%s' "$CUR_SUBVOL" | tr -d '@')" "rootflags=subvol=$CUR_SUBVOL" "" ""
+if [ "$matched" != 1 ]; then
+    # A clone (not a listed profile): inherit overlays from this profile's own existing BLS entry
+    # (re-pointed to its subvol) plus its user drop-ins, so an apt kernel install keeps them instead
+    # of dropping to a bare entry. Falls back to the base profile's overlays if it has no entry yet.
+    ovl="$(clone_overlay_line "$BASE_OPTS rootflags=subvol=$CUR_SUBVOL" "$CUR_SUBVOL" "/")"
+    emit_entry "$(printf '%s' "$CUR_SUBVOL" | tr -d '@')" "rootflags=subvol=$CUR_SUBVOL" "" "" "$ovl"
+fi
 
 exit 0

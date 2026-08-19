@@ -319,13 +319,59 @@ dt_overlay_line() {
     printf '%s' "$_o${_o:+${_u:+ }}$_u"
 }
 
-# emit_entry SUF EXTRA GATE DTBOS -> write one BLS entry for the current $ENTRY_TOKEN.
+# Base profile subvol for a derived root, from its /etc/profile_origin marker
+# (origin_stock_name=@Desktop_959_stock -> @Desktop). Empty if unmarked.
+origin_base_of() {  # $1 = mounted path
+    _po="${1:-/}/etc/profile_origin"; [ -r "$_po" ] || return 0
+    sed -n 's/^origin_stock_name=//p' "$_po" | head -n1 | sed 's/_[0-9]*_stock$//'
+}
+
+# Factory dtbos (overlay names, leading '!' stripped) for the listed profile whose rootflags
+# select subvol $1. Empty if the subvol is not a listed profile.
+profile_dtbos_for() {  # $1 = base subvol (e.g. @Desktop)
+    _want="$1"; _pf="${PROFILES:-/etc/kernel/flipper-profiles}"; [ -f "$_pf" ] || return 0
+    while IFS='|' read -r _t _s _e _g _d _l; do
+        case "$_t" in ''|\#*) continue ;; esac
+        if [ "$(subvol_of "$_e")" = "$_want" ]; then _d="$(trim "$_d")"; printf '%s' "${_d#\!}"; return 0; fi
+    done <"$_pf"
+    return 0
+}
+
+# devicetree-overlay value for a NEW derived entry ($1 options, $2 source subvol, $3 dest mounted
+# path). SYSTEM overlays are copied from the source profile's own BLS entry, re-pointed to THIS
+# entry's subvol, so a clone inherits exactly what its source applies (including any future custom
+# ones); when the source has no entry (a stock, e.g. factory reset) they come from the base
+# profile's flipper-profiles dtbos. USER drop-ins are scanned from the dest's /etc/kernel/dtbo as
+# usual (they ride along in the snapshot). Empty if none.
+clone_overlay_line() {
+    _clp="$(fdt_prefix "$1")"; _clsrc="$2"; _clsnap="$3"
+    _clsys=""
+    _clentry="$(grep -lE "rootflags=subvol=$_clsrc( |\$)" "$ENTRIES"/*.conf 2>/dev/null | sort | tail -n1)"
+    if [ -n "$_clsrc" ] && [ -n "$_clentry" ]; then
+        for _clo in $(sed -n 's/^devicetree-overlay[[:space:]]\{1,\}//p' "$_clentry" | head -n1); do
+            case "$_clo" in *"$OVERLAY_USER_PATH/"*) continue ;; esac   # user drop-in: rescanned below
+            _clsys="$_clsys${_clsys:+ }$_clp/${_clo#/*/}"               # swap /@Source/ for this subvol
+        done
+    else
+        _clbase="$(origin_base_of "$_clsnap")"
+        if [ -n "$_clbase" ]; then
+            _clsys="$(overlay_paths "$_clp" $(profile_dtbos_for "$_clbase") 2>/dev/null)" || _clsys=""
+        fi
+    fi
+    _clusr="$(user_overlay_paths "$_clp")"
+    printf '%s' "$_clsys${_clsys:+${_clusr:+ }}$_clusr"
+}
+
+# emit_entry SUF EXTRA GATE DTBOS [OVERLAY_LINE] -> write one BLS entry for the current $ENTRY_TOKEN.
+# With a 5th argument the overlay line is used verbatim (already-resolved paths, e.g. a clone that
+# copies its source's overlays); otherwise it is derived from DTBOS names + user drop-ins.
 # The filename is $ENTRY_TOKEN-$KERNEL_VERSION.conf. The token is <NN>-flipperos-<subvol>, so it
 # LEADS with the 3-digit menu band and U-Boot's bls (filename sort, descending) orders entries by
 # band then version. EXTRA carries this entry's rootflags=subvol=; BASE_OPTS has none, so there is
 # exactly one per entry. Honours gate (skip if a CONFIG_ symbol is missing) + overlays.
 emit_entry() {
     _suf="$1"; _extra="$2"; _gate="$3"; _dtbos="$4"
+    _ovl_override=0; [ $# -ge 5 ] && _ovl_override=1
 
     # gate may list several config symbols; all must be present in this kernel.
     for _g in $_gate; do
@@ -335,14 +381,19 @@ emit_entry() {
     _opts="$BASE_OPTS"
     [ -n "$_extra" ] && _opts="$_opts $_extra"
     _fn="$ENTRIES/$ENTRY_TOKEN-$KERNEL_VERSION.conf"
-    # a leading '!' on the list = required: skip the whole entry if those profile overlays are absent
-    _required=0
-    case "$_dtbos" in '!'*) _required=1; _dtbos="$(trim "${_dtbos#\!}")" ;; esac
-    if [ "$_required" = 1 ] && [ -z "$(overlay_paths "$(fdt_prefix "$_opts")" $_dtbos 2>/dev/null)" ]; then
-        log "skip $ENTRY_TOKEN (required overlays not found for $KERNEL_VERSION)"
-        return 0
+    if [ "$_ovl_override" = 1 ]; then
+        _line="$5"
+    else
+        # a leading '!' on the list = required: skip the whole entry if those profile overlays are absent
+        _required=0
+        case "$_dtbos" in '!'*) _required=1; _dtbos="$(trim "${_dtbos#\!}")" ;; esac
+        if [ "$_required" = 1 ] && [ -z "$(overlay_paths "$(fdt_prefix "$_opts")" $_dtbos 2>/dev/null)" ]; then
+            log "skip $ENTRY_TOKEN (required overlays not found for $KERNEL_VERSION)"
+            return 0
+        fi
+        _line="$(dt_overlay_line "$_opts" "$_dtbos")"
     fi
-    write_entry "$_fn" "$(make_title "$_suf")" "$_opts" "$(dt_overlay_line "$_opts" "$_dtbos")"
+    write_entry "$_fn" "$(make_title "$_suf")" "$_opts" "$_line"
 }
 
 # flipper_write_entry <subvol> <mounted-path> [<origin-hint>]: write a BLS entry for an EXISTING
@@ -386,7 +437,11 @@ flipper_write_entry() {
     # re-created; a new entry would then get a different filename instead of overwriting the
     # old one, leaving a duplicate. Deleting first refreshes it in place.
     remove_entries "$_name" "$KERNEL_VERSION"
-    emit_entry "$(printf '%s' "$_name" | tr -d '@')" "rootflags=subvol=$_name" "" ""
+    # Inherit overlays: copy the source profile's system overlays (re-pointed to this subvol) plus
+    # this root's own user drop-ins, so a clone matches its source and a factory reset gets the
+    # base profile's factory overlays.
+    _ovl="$(clone_overlay_line "$BASE_OPTS rootflags=subvol=$_name" "$_origin" "$_snap")"
+    emit_entry "$(printf '%s' "$_name" | tr -d '@')" "rootflags=subvol=$_name" "" "" "$_ovl"
     echo "flipper-bls: wrote entry for $_name (kernel $KERNEL_VERSION, token $ENTRY_TOKEN)"
 }
 

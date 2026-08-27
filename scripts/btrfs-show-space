@@ -131,7 +131,8 @@ awk -F'\t' '
 END {
     for (i = 1; i <= NR; i++) {
         split(r[i], f, "\t")
-        printf "%-*s  %-9s %11s %11s %11s\n", w, f[1], f[2], f[3], f[4], f[5]
+        # Width in the format string, not a star argument: see flipper-btrfs.sh.
+        printf "%-" w "s  %-9s %11s %11s %11s\n", f[1], f[2], f[3], f[4], f[5]
     }
 }' "$rows"
 

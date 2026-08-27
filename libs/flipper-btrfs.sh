@@ -142,7 +142,9 @@ mount_top() {
     # filesystem, and rmdir removes an empty subvolume, so it deletes profiles, @home and boot.
     # /run is tmpfs, root-only, and nobody sweeps it by glob.
     TOP=$(mktemp -d /run/flipper-btrfs.mnt.XXXXXX 2>/dev/null || mktemp -d)
-    _err=$(mount -o subvolid=5 "$ROOTDEV" "$TOP" 2>&1) || die "Mount failed: $_err"
+    # -t btrfs, or the kernel offers the options to every filesystem it has
+    # registered and each logs its refusal of `subvolid` before btrfs accepts.
+    _err=$(mount -t btrfs -o subvolid=5 "$ROOTDEV" "$TOP" 2>&1) || die "Mount failed: $_err"
 }
 
 # Best-effort was not good enough: on a signal the children (btrfs send/receive, zstd) are still
@@ -257,7 +259,11 @@ align_table() {
     END {
         for (r=1; r<=NR; r++) {
             n=split(line[r], a, "\t"); out=""
-            for (i=1; i<=n; i++) out = (i<n) ? out sprintf("%-*s  ", w[i], a[i]) : out a[i]
+            # The width is built into the format rather than passed as a star
+            # argument: mawk supports "%-*s" in some builds and refuses it in
+            # others ("%*x formats are not supported"), and the boot menu image
+            # carries one of the ones that refuses.
+            for (i=1; i<=n; i++) out = (i<n) ? out sprintf("%-" w[i] "s  ", a[i]) : out a[i]
             print out
         }
     }' "$1"

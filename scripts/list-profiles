@@ -103,17 +103,39 @@ emit() {  # $1=display name  $2=fs path
     # the profile we are running from writes its state at boot and then only now and then, so a
     # timestamp here would read as stale for the one profile that is definitely in use
     if [ -n "$mark" ]; then lu=now; else lu=$(last_used "$2" "$oepoch"); fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$mark" "$kind" "${id:-?}" "${otime:-?}" "$lu" "$flags" "$parent" "$origin" >> "$rows"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$mark" "$kind" "${id:-?}" "${otime:-?}" "$lu" "$flags" "$parent" "$origin"
 }
 
 printf 'NAME\t\tKIND\tID\tCREATED\tLAST USED\tRO\tPARENT\tORIGIN\n' > "$rows"
 # top-level profile roots + @_old_* leftovers; skip shared/reserved subvols (@snapshots,
 # @stock-snapshots, ...) so stocks (now nested under @stock-snapshots) are not listed here
+# One job per profile, because each one costs a handful of processes -- two `btrfs
+# subvolume show`s, a sed, a date, two stats -- and they share nothing but the mount and
+# the uuid map, both read-only by here. Eleven profiles done in turn is a hundred-odd
+# spawns waited for one at a time; this board has eight cores to do them on.
+#
+# Each job writes one file named by its position, so the table's order is the glob's order
+# however the jobs finish, and no two jobs append to the same file. Concurrency is capped
+# at the core count: the work is short and the cap only keeps a filesystem full of
+# profiles from starting a hundred at once.
+jobs_dir=$(mktemp -d "${TMPDIR:-/tmp}/list-profiles.XXXXXX")
+_max=$(nproc 2>/dev/null || echo 4)
+_running=0
+_i=0
 for d in "$TOP"/@*; do
     [ -e "$d" ] || continue
     n=${d##*/}
     is_reserved_subvol "$n" && continue
     btrfs subvolume show "$d" >/dev/null 2>&1 || continue
-    emit "$n" "$d"
+    _i=$((_i + 1))
+    emit "$n" "$d" > "$jobs_dir/$(printf '%04d' "$_i")" &
+    _running=$((_running + 1))
+    if [ "$_running" -ge "$_max" ]; then
+        wait
+        _running=0
+    fi
 done
+wait
+cat "$jobs_dir"/* >> "$rows" 2>/dev/null || true
+rm -rf "$jobs_dir"
 align_table "$rows"

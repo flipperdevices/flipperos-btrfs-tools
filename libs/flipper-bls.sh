@@ -254,14 +254,23 @@ user_overlay_paths() {  # $1 = subvol prefix (e.g. /@Desktop)
 # Set BASE_OPTS from CONF_ROOT/cmdline (root=UUID + policy) + this kernel's console layout.
 # FIQ kernel -> console=ttyFIQ0 ; mainline -> console=ttyS0 + ttyS4 + fbcon=map:1.
 compute_base_opts() {
+    # -G is the default and \s is a GNU extension: BusyBox grep has neither, and it fails
+    # loudly enough to print its whole usage while the caller carries on with an empty
+    # cmdline. A character class costs nothing and works in both.
     if [ -f "$CONF_ROOT/cmdline" ]; then
-        BASE_OPTS="$(grep -Gv '^\s*#' "$CONF_ROOT/cmdline" | tr -s '[:space:]' ' ')"
+        BASE_OPTS="$(grep -v '^[[:space:]]*#' "$CONF_ROOT/cmdline" | tr -s '[:space:]' ' ')"
     elif [ -f /usr/lib/kernel/cmdline ]; then
-        BASE_OPTS="$(grep -Gv '^\s*#' /usr/lib/kernel/cmdline | tr -s '[:space:]' ' ')"
+        BASE_OPTS="$(grep -v '^[[:space:]]*#' /usr/lib/kernel/cmdline | tr -s '[:space:]' ' ')"
     else
         BASE_OPTS=""
     fi
     BASE_OPTS="$(trim "$BASE_OPTS")"
+    # A cmdline that exists and reads as nothing is not a configuration, it is a broken
+    # read: an entry written from it gets no options line at all, so the profile has no
+    # root and cannot boot, and nothing would have said why.
+    if [ -z "$BASE_OPTS" ] && { [ -f "$CONF_ROOT/cmdline" ] || [ -f /usr/lib/kernel/cmdline ]; }; then
+        echo "flipper-bls: the kernel cmdline file is present but read as empty" >&2
+    fi
     # rewrite the shipped cmdline's build-time root=UUID to the fs we install onto, so a _stock
     # received onto a device with a different btrfs UUID still boots.
     # the filesystem the entry will boot from, which under -d is not the one we are running

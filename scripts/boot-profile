@@ -65,6 +65,70 @@ K="$TOP$K_REL"; I="$TOP$I_REL"
 [ -f "$K" ] || die "kernel not found: $K_REL"
 [ -z "$I_REL" ] || [ -f "$I" ] || die "initrd not found: $I_REL"
 
+# Graft this machine's /memory node onto an assembled tree.
+#
+# A shipped dtb describes the board, not the board's RAM: U-Boot writes /memory at every
+# cold boot from what the SoC reports, and a BLS entry cannot carry it. Without it a
+# kernel has no memory at all and dies before it can initialise a console, which is a
+# boot that hangs and says nothing. That node is also what keeps firmware safe: it starts
+# at 0x40200000 while ATF loads below that, so the window handed to Linux excludes it.
+#
+# The live reserve map is deliberately NOT copied. It describes the boot that is running:
+# measured on this board it is exactly the length of the initramfs U-Boot loaded, so it is
+# a fact about that boot's initrd and not about the machine. kexec tells the new kernel
+# where its own initrd is.
+#
+# Grafted rather than taking the live tree whole, because a tree belongs to its kernel:
+# every entry names the devicetreedir installed beside the kernel it boots, and the live
+# tree is whatever kernel is running now. RAM is a fact about the machine and survives
+# that difference.
+#
+# Best-effort, but never silent: a failure warns and the boot goes on, since a tree with a
+# memory node of its own is fine without us. Saying nothing is what let a broken splice sit
+# in this function through several hangs, each looking exactly like the bug it fixes.
+say() {
+    echo "boot-profile: $*" >&2
+    [ -w /dev/kmsg ] && echo "boot-profile: $*" > /dev/kmsg 2>/dev/null
+    return 0
+}
+
+graft_warn() { say "$*, booting without this machine's memory node"; }
+graft_firmware_memory() {  # $1 = assembled dtb, edited in place
+    [ -r /sys/firmware/fdt ] || return 0
+    # A tree that names its own memory needs nothing from us.
+    ! fdtget -l "$1" / 2>/dev/null | grep -qE '^memory(@|$)' || return 0
+    command -v dtc >/dev/null 2>&1 || { graft_warn "no dtc"; return 0; }
+
+    _live_dts=$(mktemp /tmp/boot-profile.XXXXXX.live.dts)
+    _asm_dts=$(mktemp /tmp/boot-profile.XXXXXX.asm.dts)
+    _new_dts=$(mktemp /tmp/boot-profile.XXXXXX.new.dts)
+    _new_dtb=$(mktemp /tmp/boot-profile.XXXXXX.new.dtb)
+    TOP_TMPFILES="${TOP_TMPFILES:-} $_live_dts $_asm_dts $_new_dts $_new_dtb"
+    dtc -I dtb -O dts -o "$_live_dts" /sys/firmware/fdt 2>/dev/null \
+        || { graft_warn "the live tree will not decompile"; return 0; }
+    dtc -I dtb -O dts -o "$_asm_dts" "$1" 2>/dev/null \
+        || { graft_warn "the profile's tree will not decompile"; return 0; }
+
+    _mem=$(awk '/^\tmemory(@[0-9a-fA-F]+)? \{$/,/^\t\};$/' "$_live_dts")
+    [ -n "$_mem" ] || { graft_warn "the live tree has no memory node"; return 0; }
+
+    # As the root's LAST child: dtc has already written the root's properties, and a
+    # property may not follow a node.
+    awk -v mem="$_mem" '
+        { line[NR] = $0; if ($0 == "};") last = NR }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (i == last) print mem
+                print line[i]
+            }
+        }
+    ' "$_asm_dts" > "$_new_dts" || { graft_warn "the splice failed"; return 0; }
+    dtc -I dts -O dtb -o "$_new_dtb" "$_new_dts" 2>/dev/null \
+        || { graft_warn "the grafted tree will not compile"; return 0; }
+    cat "$_new_dtb" > "$1"
+    say "grafted this machine's memory node onto the profile's device tree"
+}
+
 DTB=$(mktemp /tmp/boot-profile.XXXXXX.dtb); TOP_TMPFILES="${TOP_TMPFILES:-} $DTB"
 booted=$(findmnt -no FSROOT / 2>/dev/null); booted=${booted#/}
 # The running profile's tree is the live one, but only when this really is the filesystem we booted
@@ -91,6 +155,7 @@ else
     else
         cp "$base" "$DTB"
     fi
+    graft_firmware_memory "$DTB"
 fi
 
 # --kexec-syscall, or the tree assembled above is thrown away. kexec-tools defaults to
@@ -118,7 +183,7 @@ fi
 # then does the loaded image run. It needs systemd to ask, which a booted profile has and an
 # initramfs does not.
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-    echo "boot-profile: kexec into $arg, handing over with systemctl kexec"
+    say "kexec into $arg, handing over with systemctl kexec"
     exec systemctl kexec
 fi
 
@@ -126,8 +191,9 @@ fi
 # kernel, so the assembled dtb and our own mount of the top level have done their job; drop them
 # now, because `kexec -e` never returns and the EXIT trap would never run, leaving a mount for the
 # new kernel to find dirty.
-echo "boot-profile: kexec into $arg, no systemd, jumping straight in"
+say "kexec into $arg, no systemd, jumping straight in"
 top_cleanup
 trap - EXIT INT TERM HUP
+
 sync
 kexec -e || die "kexec -e refused, though the load succeeded"

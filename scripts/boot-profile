@@ -195,5 +195,14 @@ say "kexec into $arg, no systemd, jumping straight in"
 top_cleanup
 trap - EXIT INT TERM HUP
 
+# Anything else of ours still mounted belongs to a tool that has not finished: a size walk
+# takes seconds and the menu can boot while one runs, so its top-level mount is still live
+# with reads in flight. Drop them all, lazily where a reader holds one. The jump is
+# committed by here, and the alternative is what the log shows: the disks go offline under
+# a mounted filesystem and its reads fail on the way out.
+for _m in $(awk '$3 == "btrfs" { print $2 }' /proc/self/mounts | sort -r); do
+    umount "$_m" 2>/dev/null || umount -l "$_m" 2>/dev/null || true
+done
+
 sync
 kexec -e || die "kexec -e refused, though the load succeeded"

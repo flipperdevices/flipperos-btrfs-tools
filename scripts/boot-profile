@@ -2,8 +2,9 @@
 # boot-profile <@profile> - kexec directly into a bootable PROFILE (as listed by list-profiles),
 # skipping the firmware/U-Boot cycle. Reads the profile's BLS entry for the kernel, initrd and
 # cmdline; assembles its device tree (the booted profile's is the live one, any other profile's is
-# the board base dtb + the entry's overlays via fdtoverlay); loads it with kexec and hands over
-# with `systemctl kexec` (clean shutdown, nothing reserved). --dry-run loads then unloads instead.
+# the board base dtb + the entry's overlays via fdtoverlay); loads it with kexec and hands over:
+# `systemctl kexec` where systemd is running (clean shutdown, nothing reserved), `kexec -e` where
+# it is not, which is an initramfs. --dry-run loads then unloads instead.
 set -eu
 [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-btrfs.sh
@@ -11,7 +12,8 @@ set -eu
 usage() {
     cat <<EOF
 Usage: boot-profile [--dry-run] [-d|--device DEV] <@profile>
-  kexec into the profile: load its BLS kernel/initrd/dtb, then hand over via systemctl kexec.
+  kexec into the profile: load its BLS kernel/initrd/dtb, then hand over: systemctl kexec
+  under systemd, kexec -e without it.
   --dry-run   assemble + load with kexec, then unload: validates without rebooting
 $HELP_DEVICE
 EOF
@@ -101,5 +103,20 @@ if [ "$dry" = 1 ]; then
     exit 0
 fi
 
-echo "boot-profile: kexec into $arg, handing over with systemctl kexec"
-exec systemctl kexec
+# `systemctl kexec` is the clean way over: services stop, filesystems are unmounted, and only
+# then does the loaded image run. It needs systemd to ask, which a booted profile has and an
+# initramfs does not.
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    echo "boot-profile: kexec into $arg, handing over with systemctl kexec"
+    exec systemctl kexec
+fi
+
+# No systemd to ask, so do by hand the little that still matters. The image is already in the
+# kernel, so the assembled dtb and our own mount of the top level have done their job; drop them
+# now, because `kexec -e` never returns and the EXIT trap would never run, leaving a mount for the
+# new kernel to find dirty.
+echo "boot-profile: kexec into $arg, no systemd, jumping straight in"
+top_cleanup
+trap - EXIT INT TERM HUP
+sync
+kexec -e || die "kexec -e refused, though the load succeeded"

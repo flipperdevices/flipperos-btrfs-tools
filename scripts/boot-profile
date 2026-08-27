@@ -1,8 +1,10 @@
 #!/bin/sh
 # boot-profile <@profile> - kexec directly into a bootable PROFILE (as listed by list-profiles),
 # skipping the firmware/U-Boot cycle. Reads the profile's BLS entry for the kernel, initrd and
-# cmdline; assembles its device tree (the booted profile's is the live one, any other profile's is
-# the board base dtb + the entry's overlays via fdtoverlay); loads it with kexec and hands over:
+# cmdline from the filesystem that profile is on rather than from /boot, so `-d` boots an SD card's
+# profile with the card's own kernel; assembles its device tree (the booted profile's is the live
+# one, any other profile's is the board base dtb + the entry's overlays via fdtoverlay); loads it
+# with kexec and hands over:
 # `systemctl kexec` where systemd is running (clean shutdown, nothing reserved), `kexec -e` where
 # it is not, which is an initramfs. --dry-run loads then unloads instead.
 set -eu
@@ -40,7 +42,17 @@ need_root
 command -v kexec     >/dev/null 2>&1 || die "kexec not installed (kexec-tools)"
 command -v fdtoverlay >/dev/null 2>&1 || die "fdtoverlay not installed"
 
-ENTRIES=/boot/loader/entries
+# BLS paths are top-level (/@X/...); read them under a subvolid=5 mount so this works for any
+# profile, booted or not.
+mount_top
+
+# The entries belong to the filesystem the profile lives on, not to the one we booted from. For the
+# booted filesystem $TOP/boot is the same subvolume that /boot already is, so this is the same file.
+# For any other -- an SD card written with our own image -- it is that card's own entries, which is
+# the only place its paths resolve: a card carries its own kernels, so an entry read from /boot
+# names a version the card does not have, and profile names repeat across filesystems, so the wrong
+# entry is found rather than none.
+ENTRIES=$TOP/boot/loader/entries
 # newest entry (highest kernel version sorts last) whose cmdline mounts this subvol
 entry=$(grep -lE "rootflags=subvol=$arg( |\$)" "$ENTRIES"/*.conf 2>/dev/null | sort | tail -n1)
 [ -n "$entry" ] || die "No boot entry for $arg (see list-profiles)"
@@ -49,17 +61,16 @@ K_REL=$(val linux); I_REL=$(val initrd); OPTS=$(val options)
 DT_REL=$(val devicetree); DTDIR_REL=$(val devicetreedir); OVL_REL=$(val devicetree-overlay)
 [ -n "$K_REL" ]  || die "boot entry has no 'linux' line"
 [ -n "$OPTS" ]   || die "boot entry has no 'options' line"
-
-# BLS paths are top-level (/@X/...); read them under a subvolid=5 mount so this works for any
-# profile, booted or not.
-mount_top
 K="$TOP$K_REL"; I="$TOP$I_REL"
 [ -f "$K" ] || die "kernel not found: $K_REL"
 [ -z "$I_REL" ] || [ -f "$I" ] || die "initrd not found: $I_REL"
 
 DTB=$(mktemp /tmp/boot-profile.XXXXXX.dtb); TOP_TMPFILES="${TOP_TMPFILES:-} $DTB"
 booted=$(findmnt -no FSROOT / 2>/dev/null); booted=${booted#/}
-if [ "$arg" = "$booted" ] && [ -r /sys/firmware/fdt ]; then
+# The running profile's tree is the live one, but only when this really is the filesystem we booted
+# from: profile names repeat across filesystems, so a card's @Desktop would otherwise be handed the
+# internal @Desktop's device tree.
+if ! target_fs_differs && [ "$arg" = "$booted" ] && [ -r /sys/firmware/fdt ]; then
     # the running profile: reuse the live, fully-assembled tree
     cat /sys/firmware/fdt > "$DTB"
 else

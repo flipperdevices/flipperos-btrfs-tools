@@ -18,8 +18,8 @@
 # accounts follow the new base. Everything the user changed is migrated EXCEPT a denylist of noise: package
 # files (replayed via apt instead), caches, regenerated runtime state, and generated/per-device
 # identity files (machine-id, ld.so.cache, and the like). SSH host keys are carried explicitly,
-# by policy rather than by delta, so the migrated profile keeps the device's ssh identity even
-# though the build bakes the same keys into every image (no host-key-changed warnings).
+# by policy rather than by delta, so the migrated profile keeps the device's ssh identity rather
+# than the keys its own first boot generated (no host-key-changed warnings).
 #
 # Default is a DRY RUN. -a/--apply performs it (snapshots <@dst> to @snapshots/<dst>_<ts>_before_
 # migrate first) and then, if any conflicts remain, drops straight into interactive resolution
@@ -248,6 +248,8 @@ function is_noise(p) {
     if (p=="etc/machine-id"||p=="etc/machine-info"||p=="etc/hostname"||p=="etc/fstab"||p=="etc/os-release"||p=="etc/profile_origin"||p=="etc/ld.so.cache"||p=="etc/.updated"||p=="etc/resolv.conf") return 1
     if (p ~ /^etc\/kernel\/(entry-token|cmdline)$/) return 1
     if (p ~ /^etc\/ssh\/welcome_banner/) return 1
+    # the host keys are per-device now, so they land in the delta; carried by policy below instead
+    if (p ~ /^etc\/ssh\/ssh_host_/) return 1
     if (p ~ /^etc\/avahi\/services(\/|$)/) return 1
     if (p ~ /^etc\/ssl\/certs(\/|$)/) return 1
     if (p=="var/lib/dbus/machine-id") return 1
@@ -519,9 +521,10 @@ while IFS= read -r f; do
     else echo "$f" >> "$WORK/overlap"; fi
 done < "$WORK/changed"
 
-# The ssh host keys ARE the device identity, so they follow the device, not the base. The delta never
-# mentions them (the image bakes the same keys everywhere, so src's copy equals the ancestor's), so
-# carry them by policy. Prints the files dst lacks, so preview and apply agree on the count.
+# The ssh host keys ARE the device identity, so they follow the device, not the base. The image ships
+# none (each root generates its own on first boot), so the delta would report src's as a user change:
+# it drops them as noise and they are carried by policy here, whatever dst already has. Prints the
+# files dst lacks, so preview and apply agree on the count.
 ssh_identity_files() {
     [ -d "$TOP/$src/etc/ssh" ] || return 0
     for _k in "$TOP/$src"/etc/ssh/ssh_host_*; do

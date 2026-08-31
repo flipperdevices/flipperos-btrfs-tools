@@ -31,9 +31,11 @@ order and have to survive the copy.
 | `migrate-profile` | carry a profile's changes onto a newer base |
 | `btrfs-maintenance`, `btrfs-show-space` | scrub, dedup, balance, usage |
 | `add-dtbo` | per-profile device-tree overlay drop-ins |
+| `apt-backup-profile` | the backup apt offers before it changes packages |
 
 Every tool takes `-d/--device DEV` to operate on a filesystem other than the booted one, which is how
-they are used from a recovery boot.
+they are used from a recovery boot. `apt-backup-profile` is the exception: it backs up the profile
+the running apt is about to change, which is always the booted one.
 
 ## Relationship to flipperone-linux-build-scripts
 
@@ -43,6 +45,11 @@ the other direction and are worth knowing before changing either side.
 **The image depends on this package for boot entries.** `hooks/90-loaderentry.install` is what
 writes a BLS entry when a kernel is installed. Without this package a kernel upgrade produces no
 entry, and the image build itself sources `libs/flipper-bls.sh` to fan out per-profile entries.
+
+**The apt hook ships from the image.** `apt-backup-profile` is what
+`/etc/apt/apt.conf.d/80-flipper-apt-backup` calls, and that drop-in belongs to
+flipperone-linux-build-scripts. Either half alone is inert: the drop-in tests that the script is
+executable before calling it, and the script asks nothing unless apt is about to change packages.
 
 **`flipper-profiles` stays in the image.** `flipper-bls.sh` reads `/etc/kernel/flipper-profiles` for
 the menu bands and session of each profile. That file describes a particular image's profiles, so it

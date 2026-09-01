@@ -638,11 +638,23 @@ else
         # (e.g. "flipper,one-rev-f0b0c1" -> rk3576-flipper-one-rev-f0b0c1.dtb)
         base=$(base_dtb)
         [ -f "$base" ] || die "base device tree not found: ${base#$TOP}"
+        # An overlay is applied by resolving the labels it references against the base, so the
+        # base has to carry the symbol table dtc writes with -@. Kernels built without it ship
+        # dtbs less than half the size and no /__symbols__, and every overlay against them
+        # fails the same way, deep inside fdtoverlay. Say it here, where the answer is
+        # actionable: the profile needs a kernel whose dtbs carry symbols.
+        if [ -n "$OVL_REL" ] && command -v fdtget >/dev/null 2>&1; then
+            fdtget -l "$base" / 2>/dev/null | grep -qx '__symbols__' \
+                || die "${base#$TOP} has no symbol table (dtc -@); no overlay can apply"
+        fi
         say "device tree: assembling ${base#$TOP} plus $(set -- $OVL_REL; echo $#) overlay(s)"
         ovl=""
         for o in $OVL_REL; do ovl="$ovl $TOP$o"; done
         if [ -n "$ovl" ]; then
-            fdtoverlay -i "$base" -o "$DTB" $ovl || die "fdtoverlay failed to apply overlays"
+            # fdtoverlay names the file and the reason; without them the failure is
+            # unreadable, which is what sent one card boot looking in the wrong place.
+            _err=$(fdtoverlay -i "$base" -o "$DTB" $ovl 2>&1) \
+                || die "fdtoverlay failed: $(printf '%s' "$_err" | tr '\n' ' ')"
         else
             cp "$base" "$DTB"
         fi

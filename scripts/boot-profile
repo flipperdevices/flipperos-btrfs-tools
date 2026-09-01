@@ -22,6 +22,14 @@
 # handing over: a pivot has nothing to load, so it stops there, and a kexec assembles the
 # device tree and loads and unloads the image. --no-pivot forces kexec, which is also how to
 # dry-run the kexec path on a machine that would pivot.
+#
+# The loading is also what a boot menu can do before it is asked to boot anything, since it is
+# the slow part and it happens while the machine is idle: measured on this board a kexec boot
+# spends 2.4s of its 13.8s loading, all of it inside the syscall, and none of that is reading
+# files (0.08s cold) or assembling the device tree (0.04s). --arm does everything up to and
+# including the load and stops; a later boot of the same profile finds its image already in the
+# kernel and hands over at once. --disarm discards it. The kernel holds one image at a time, so
+# only one profile can be armed, which is why the menu arms the one it would boot by itself.
 set -eu
 [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-btrfs.sh
@@ -36,16 +44,24 @@ Usage: boot-profile [--dry-run] [--no-pivot] [-d|--device DEV] <@profile>
   --dry-run   report the decision and validate it without rebooting: a pivot loads
               nothing, a kexec assembles + loads + unloads its image
   --no-pivot  never pivot, even where it would work
+  --arm       load the image this profile would kexec into and stop there, so that a later
+              boot of the same profile hands over without loading anything. Nothing to arm
+              for a profile that would be pivoted into, and nothing is loaded then
+  --disarm    discard an image left loaded by --arm. Takes no profile
 $HELP_DEVICE
 EOF
 }
 
 dry=0
 no_pivot=0
+arm=0
+disarm=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)   dry=1 ;;
         --no-pivot)  no_pivot=1 ;;
+        --arm)       arm=1 ;;
+        --disarm)    disarm=1 ;;
         -d|--device) shift; need_device_arg "$#"; ROOTDEV=$1 ;;
         --device=*)  ROOTDEV=${1#*=} ;;
         -h|--help)   usage; exit 0 ;;
@@ -55,6 +71,37 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+# Where --arm records what it loaded, so a later boot can tell whether the image in the kernel
+# is the one it wants. On tmpfs either side of a handover, which is what makes it truthful: a
+# record surviving into the next boot would describe an image that is no longer loaded.
+ARMED=/run/boot-profile.armed
+
+# One image at a time, so discarding is unconditional: the kernel keeps a single kexec_image
+# and there is nothing to name. EBUSY means another process holds the kexec lock, which is a
+# load still running, so wait it out rather than report a failure it will not see again.
+kexec_wait() {  # "$@" = the kexec invocation
+    _n=0
+    while ! "$@" 2>/dev/null; do
+        _n=$((_n + 1))
+        [ "$_n" -lt 40 ] || return 1
+        sleep 0.1
+    done
+    return 0
+}
+
+if [ "$disarm" = 1 ]; then
+    rm -f "$ARMED"
+    if [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ]; then
+        kexec_wait kexec --kexec-syscall -u || die "cannot discard the loaded image"
+        echo "boot-profile: disarmed, the loaded image is discarded"
+    else
+        echo "boot-profile: nothing was loaded"
+    fi
+    exit 0
+fi
+
+[ "$arm" = 0 ] || [ "$dry" = 0 ] || die "--arm loads an image and --dry-run loads none"
+
 [ $# -ge 1 ] || { usage >&2; exit 1; }
 arg=$1
 case "$arg" in *..*|/*) die "Invalid name: $arg" ;; esac
@@ -366,8 +413,22 @@ pivot_reason() {
     return 0
 }
 
+# An image loaded by --arm, given back before a pivot hands over.
+#
+# A pivot keeps this kernel, and /run with it, so an image left loaded outlives the handover:
+# it would sit in the new userspace holding its memory (measured 303MB) for a profile nobody
+# is booting, with a record describing it that nothing will ever act on. It can only be for
+# another profile, since arming one that would be pivoted into loads nothing at all.
+drop_armed_image() {
+    [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ] || { rm -f "$ARMED"; return 0; }
+    rm -f "$ARMED"
+    kexec_wait kexec --kexec-syscall -u || { say "could not discard the armed image"; return 0; }
+    say "discarded the image armed for another profile: a pivot needs none"
+}
+
 # Mount nothing, load nothing: write down what init needs and ask it to take over.
 pivot_switch_root() {
+    drop_armed_image
     _init=$(pivot_init)
     say "pivot into $arg by switch_root: kernel $RUNNING and its device tree are live, init $_init"
     # In the initramfs root, not /run: the shutdown pass init runs before boot-pivot unmounts
@@ -388,6 +449,7 @@ pivot_switch_root() {
 
 # The profile goes at /run/nextroot and systemd does the rest.
 pivot_soft_reboot() {
+    drop_armed_image
     say "pivot into $arg with soft-reboot: kernel $RUNNING and its device tree stay up"
     mkdir -p /run/nextroot
     _err=$(mount -t btrfs -o "rw,subvol=$arg" "$ROOTDEV" /run/nextroot 2>&1) \
@@ -418,6 +480,20 @@ if [ -z "$PIVOT_WHY" ]; then
     if [ "$dry" = 1 ]; then
         say "dry run: $arg would be pivoted into with $PIVOT_HOW; nothing loaded, nothing changed"
         say "dry run: add --no-pivot to prove the kexec path on this machine"
+        exit 0
+    fi
+    # Arming is preparation for a boot, never a boot: a pivot has nothing to prepare, so say so
+    # and stop. Without this the menu would boot the profile the moment it armed it.
+    if [ "$arm" = 1 ]; then
+        rm -f "$ARMED"
+        # An image left over from arming something else has to go with the record. A pivot keeps
+        # this kernel running, so it would otherwise sit there holding its memory for the rest of
+        # the machine's life, armed for a profile nobody asked for.
+        if [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ]; then
+            kexec_wait kexec --kexec-syscall -u || true
+            say "discarded the image armed earlier: $arg needs none"
+        fi
+        say "nothing to arm for $arg: a pivot with $PIVOT_HOW loads nothing"
         exit 0
     fi
     case "$PIVOT_HOW" in
@@ -523,47 +599,85 @@ graft_firmware_memory() {  # $1 = assembled dtb, edited in place
 command -v kexec      >/dev/null 2>&1 || die "kexec not installed (kexec-tools), and $arg cannot be pivoted into: $PIVOT_WHY"
 command -v fdtoverlay >/dev/null 2>&1 || die "fdtoverlay not installed"
 
-DTB=$(mktemp /tmp/boot-profile.XXXXXX.dtb); TOP_TMPFILES="${TOP_TMPFILES:-} $DTB"
-booted=$(findmnt -no FSROOT / 2>/dev/null); booted=${booted#/}
-# The running profile's device tree is the live one, but only when this really is the filesystem
-# we booted from: profile names repeat across filesystems, so a card's @Desktop would otherwise
-# be handed the
-# internal @Desktop's device tree.
-if ! target_fs_differs && [ "$arg" = "$booted" ] && [ -r /sys/firmware/fdt ]; then
-    # the running profile: reuse the live, fully-assembled device tree
-    say "device tree: the live one, since $arg is what is running"
-    cat /sys/firmware/fdt > "$DTB"
-else
-    # base board dtb, chosen from the running board's first compatible
-    # (e.g. "flipper,one-rev-f0b0c1" -> rk3576-flipper-one-rev-f0b0c1.dtb)
-    base=$(base_dtb)
-    [ -f "$base" ] || die "base device tree not found: ${base#$TOP}"
-    say "device tree: assembling ${base#$TOP} plus $(set -- $OVL_REL; echo $#) overlay(s)"
-    ovl=""
-    for o in $OVL_REL; do ovl="$ovl $TOP$o"; done
-    if [ -n "$ovl" ]; then
-        fdtoverlay -i "$base" -o "$DTB" $ovl || die "fdtoverlay failed to apply overlays"
-    else
-        cp "$base" "$DTB"
-    fi
-    graft_firmware_memory "$DTB"
-fi
+# Whether the image already in the kernel is the one this boot wants. --arm leaves a record of
+# what it loaded; everything that would change the image is compared against it, and the flag
+# is read too, since an image can be discarded without the record going with it.
+armed_for() {  # $1 = profile
+    [ -r "$ARMED" ] || return 1
+    [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ] || return 1
+    A_PROFILE=; A_DEV=; A_ENTRY=; A_KREL=; A_OPTS=; A_KERNEL=; A_INITRD=
+    . "$ARMED"
+    # Paths go in without the mount point they were read through: every run mounts the top
+    # level somewhere new, so the recorded path would never match the next one.
+    [ "$A_PROFILE" = "$1" ] && [ "$A_DEV" = "$ROOTDEV" ] && [ "$A_ENTRY" = "${entry#$TOP}" ] \
+        && [ "$A_KREL" = "$KREL" ] && [ "$A_OPTS" = "$OPTS" ] \
+        && [ "$A_KERNEL" = "$K_REL" ] && [ "$A_INITRD" = "$I_REL" ]
+}
 
-# --kexec-syscall, or the device tree assembled above is thrown away. kexec-tools defaults to
-# kexec_file_load, and on that path arm64 discards a user-supplied dtb on purpose --
-# `if (do_kexec_file_syscall) arm64_opts.dtb = NULL;` -- because the kernel builds the new
-# device tree from the running one. The old syscall runs the arm64 purgatory, which loads our
-# dtb as
-# a segment and enters the kernel with its address in x0.
-#
-# --no-checks with it, because that purgatory otherwise SHA-256s every segment before it
-# branches: measured on this board, 12 of the 13.5 seconds between "Starting new kernel" and
-# the new kernel's first console line, for 42MB of kernel and initrd. The digest is worth
-# paying for a crash kernel loaded hours in advance; here the same tool wrote those segments
-# milliseconds ago on a machine that is about to jump into them, with no firmware handoff and
-# nothing else running in between.
-kexec --kexec-syscall --no-checks -l "$K" ${I_REL:+--initrd="$I"} \
-    --dtb="$DTB" --command-line="$OPTS" || die "kexec load failed"
+if armed_for "$arg"; then
+    if [ "$arm" = 1 ]; then
+        say "$arg is armed already: its image is loaded and nothing has changed"
+        top_cleanup
+        trap - EXIT INT TERM HUP
+        exit 0
+    fi
+    say "kexec into $arg with the image --arm already loaded, nothing to assemble or load"
+else
+    DTB=$(mktemp /tmp/boot-profile.XXXXXX.dtb); TOP_TMPFILES="${TOP_TMPFILES:-} $DTB"
+    booted=$(findmnt -no FSROOT / 2>/dev/null); booted=${booted#/}
+    # The running profile's device tree is the live one, but only when this really is the filesystem
+    # we booted from: profile names repeat across filesystems, so a card's @Desktop would otherwise
+    # be handed the
+    # internal @Desktop's device tree.
+    if ! target_fs_differs && [ "$arg" = "$booted" ] && [ -r /sys/firmware/fdt ]; then
+        # the running profile: reuse the live, fully-assembled device tree
+        say "device tree: the live one, since $arg is what is running"
+        cat /sys/firmware/fdt > "$DTB"
+    else
+        # base board dtb, chosen from the running board's first compatible
+        # (e.g. "flipper,one-rev-f0b0c1" -> rk3576-flipper-one-rev-f0b0c1.dtb)
+        base=$(base_dtb)
+        [ -f "$base" ] || die "base device tree not found: ${base#$TOP}"
+        say "device tree: assembling ${base#$TOP} plus $(set -- $OVL_REL; echo $#) overlay(s)"
+        ovl=""
+        for o in $OVL_REL; do ovl="$ovl $TOP$o"; done
+        if [ -n "$ovl" ]; then
+            fdtoverlay -i "$base" -o "$DTB" $ovl || die "fdtoverlay failed to apply overlays"
+        else
+            cp "$base" "$DTB"
+        fi
+        graft_firmware_memory "$DTB"
+    fi
+
+    # --kexec-syscall, or the device tree assembled above is thrown away. kexec-tools defaults to
+    # kexec_file_load, and on that path arm64 discards a user-supplied dtb on purpose --
+    # `if (do_kexec_file_syscall) arm64_opts.dtb = NULL;` -- because the kernel builds the new
+    # device tree from the running one. The old syscall runs the arm64 purgatory, which loads our
+    # dtb as
+    # a segment and enters the kernel with its address in x0.
+    #
+    # --no-checks with it, because that purgatory otherwise SHA-256s every segment before it
+    # branches: measured on this board, 12 of the 13.5 seconds between "Starting new kernel" and
+    # the new kernel's first console line, for 42MB of kernel and initrd. The digest is worth
+    # paying for a crash kernel loaded hours in advance; here the same tool wrote those segments
+    # milliseconds ago on a machine that is about to jump into them, with no firmware handoff and
+    # nothing else running in between.
+    kexec_wait kexec --kexec-syscall --no-checks -l "$K" ${I_REL:+--initrd="$I"} \
+        --dtb="$DTB" --command-line="$OPTS" || die "kexec load failed"
+
+    if [ "$arm" = 1 ]; then
+        printf "A_PROFILE='%s'\nA_DEV='%s'\nA_ENTRY='%s'\nA_KREL='%s'\nA_OPTS='%s'\n" \
+            "$arg" "$ROOTDEV" "${entry#$TOP}" "$KREL" "$OPTS" > "$ARMED" \
+            || die "cannot write $ARMED"
+        printf "A_KERNEL='%s'\nA_INITRD='%s'\n" "$K_REL" "$I_REL" >> "$ARMED"
+        say "armed $arg: its image is loaded and a boot of it now hands over straight away"
+        # The assembled device tree is in the image already, and the mount was only needed to
+        # read it. Both go, or an arm leaves a mount live until something else boots.
+        top_cleanup
+        trap - EXIT INT TERM HUP
+        exit 0
+    fi
+fi
 
 if [ "$dry" = 1 ]; then
     kexec --kexec-syscall -u 2>/dev/null || true

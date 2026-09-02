@@ -1,8 +1,11 @@
 #!/bin/sh
-# boot-profile <@profile> - boot directly into a bootable PROFILE (as listed by list-profiles),
-# skipping the firmware/U-Boot cycle. Reads the profile's BLS entry for the kernel, initrd and
-# cmdline from the filesystem that profile is on rather than from /boot, so `-d` boots an SD card's
-# profile with the card's own kernel.
+# boot-profile <entry|@profile> - boot directly into a bootable profile, skipping the
+# firmware/U-Boot cycle. What is booted is one BLS entry: it names the kernel, the initrd, the
+# command line and the device tree, and the subvolume its command line mounts is the profile.
+# Naming the entry is how a profile with several kernels installed is booted with the one meant.
+# A @profile (as listed by list-profiles) still works and takes that profile's newest entry.
+# Entries are read from the filesystem the profile is on rather than from /boot, so `-d` boots an
+# SD card's profile with the card's own kernel.
 #
 # Two ways over, and the profile's own entry decides which:
 #
@@ -33,19 +36,24 @@
 set -eu
 [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-btrfs.sh
+# Entry names, the boot counter and the order: shared with the library that writes entries.
+[ -r /usr/lib/flipper-blsname.sh ] || { echo "Error: /usr/lib/flipper-blsname.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-blsname.sh
 
 usage() {
     cat <<EOF
-Usage: boot-profile [--dry-run] [--no-pivot] [-d|--device DEV] <@profile>
-  Boot the profile: pivot into it where its kernel and device tree are already running
+Usage: boot-profile [--dry-run] [--no-pivot] [-d|--device DEV] <entry|@profile>
+  <entry> is a boot entry's file name under loader/entries, with or without .conf, which is
+  one profile on one kernel. <@profile> is a profile name and takes its newest entry.
+  Boot it: pivot into it where its kernel and device tree are already running
   (switch_root from an initramfs, systemctl soft-reboot from a booted profile), else load
   its BLS kernel/initrd/dtb and kexec, handing over with systemctl kexec under systemd and
   kexec -e without it.
   --dry-run   report the decision and validate it without rebooting: a pivot loads
               nothing, a kexec assembles + loads + unloads its image
   --no-pivot  never pivot, even where it would work
-  --arm       load the image this profile would kexec into and stop there, so that a later
-              boot of the same profile hands over without loading anything. Nothing to arm
+  --arm       load the image this entry would kexec into and stop there, so that a later
+              boot of the same entry hands over without loading anything. Nothing to arm
               for a profile that would be pivoted into, and nothing is loaded then
   --disarm    discard an image left loaded by --arm. Takes no profile
 $HELP_DEVICE
@@ -104,7 +112,7 @@ fi
 
 [ $# -ge 1 ] || { usage >&2; exit 1; }
 arg=$1
-case "$arg" in *..*|/*) die "Invalid name: $arg" ;; esac
+case "$arg" in *..*|*/*) die "Invalid name: $arg" ;; esac
 
 need_root
 
@@ -128,14 +136,47 @@ mount_top
 # names a version the card does not have, and profile names repeat across filesystems, so the wrong
 # entry is found rather than none.
 ENTRIES=$TOP/boot/loader/entries
-# newest entry (highest kernel version sorts last) whose cmdline mounts this subvol
-entry=$(grep -lE "rootflags=subvol=$arg( |\$)" "$ENTRIES"/*.conf 2>/dev/null | sort | tail -n1)
-[ -n "$entry" ] || die "No boot entry for $arg (see list-profiles)"
+# An entry id names one kernel, which is the only way to ask for a kernel that is not the newest
+# and what the boot menu's rows are. A @profile names all of a profile's kernels, so one has to
+# be chosen: the newest by when its entry file was written.
+#
+# Written, not named or versioned: ours are git-describe strings and do not order.
+# 7.2.0-00249-g26619ffca0bd sorts before 7.2.0-ga0d2d145deeb under every rule a machine can
+# apply, digits before letters, and it is the newer kernel of the two. kernel-install writes the
+# entry at install time, so that is the fact that answers "the one just installed".
+case "$arg" in
+    @*)
+        # The profile's own place in the boot order: the first of its entries the order gives,
+        # which is the kernel chosen for it (rank 0), or its next one when that one is bad.
+        entry=$(
+            for _e in $(sorted_entries); do
+                [ "$(entry_subvol_of "$_e")" = "$arg" ] || continue
+                echo "$_e"
+                break
+            done
+        )
+        [ -n "$entry" ] || die "No boot entry for $arg (see list-profiles)"
+        ;;
+    *)
+        # An id names one entry whatever counter it carries, and the counter changes under us.
+        entry=""
+        for _e in $(entry_files_for "${arg%.conf}"); do entry=$_e; done
+        [ -n "$entry" ] || die "No boot entry $arg on this filesystem"
+        ;;
+esac
 val() { sed -n "s/^$1[[:space:]]\{1,\}//p" "$entry" | head -n1; }
 K_REL=$(val linux); I_REL=$(val initrd); OPTS=$(val options)
 DT_REL=$(val devicetree); DTDIR_REL=$(val devicetreedir); OVL_REL=$(val devicetree-overlay)
 [ -n "$K_REL" ]  || die "boot entry has no 'linux' line"
 [ -n "$OPTS" ]   || die "boot entry has no 'options' line"
+# The profile is the subvolume the entry mounts, whichever way it was asked for. Everything
+# after this is about the profile -- whether it can be pivoted into, which root to put in
+# place, what to say is being booted -- and the entry is where that is written down.
+arg=$(printf '%s' "$OPTS" | tr ' ' '\n' | sed -n 's/^rootflags=subvol=//p' | cut -d, -f1 | head -n1)
+[ -n "$arg" ] || die "boot entry ${entry##*/} mounts no subvolume"
+# Which entry, in the log as well as on stderr: the id carries the kernel version, so this is
+# the line that says afterwards which kernel a boot actually took.
+say "entry ${entry##*/} mounts $arg"
 K="$TOP$K_REL"; I="$TOP$I_REL"
 [ -f "$K" ] || die "kernel not found: $K_REL"
 [ -z "$I_REL" ] || [ -f "$I" ] || die "initrd not found: $I_REL"
@@ -228,7 +269,7 @@ pivot_modules() {
 # image rather than to any profile.
 norm_args() {
     printf '%s\n' "$1" | tr ' \t' '\n\n' | grep -v '^$' \
-        | grep -vE '^(root|rootflags|bootmenu)=' | sort | tr '\n' ' '
+        | grep -vE '^(root|rootflags|bootmenu|flipper\.entry)=' | sort | tr '\n' ' '
 }
 
 # How the profile's command line differs from the one this boot got, or nothing when they
@@ -426,11 +467,47 @@ drop_armed_image() {
     say "discarded the image armed for another profile: a pivot needs none"
 }
 
+# Count this attempt against the entry, at the point of no return and not before: a boot that
+# never happened must not spend a try, so this is called after everything that can still fail.
+#
+# The spec's counter, in the entry's own file name: tries left down, tries done up, and at zero the
+# entry is 'bad' and sorts last, which is what hands the device back to the kernel that did boot.
+# An entry with no counter has been blessed by a good boot already and is left alone.
+#
+# Best effort, loudly: a boot must not be refused because a file could not be renamed, but a
+# counter that silently stops counting is a fallback that silently stops working.
+count_attempt() {
+    name_the_boot
+    _was="$(entry_counter_of "$entry")"
+    [ -n "$_was" ] || return 0
+    _now="$(decrement_entry "$entry")" || { say "could not count this attempt against ${entry##*/}"; return 0; }
+    entry=$_now
+    say "attempt counted: ${entry##*/} (was $_was)"
+    return 0
+}
+
+# Where a pivot leaves the entry's id for the system it hands over to.
+#
+# An entry names itself on its command line, and that is how flipper-bless-boot knows what to bless
+# -- but a pivot does not boot a kernel, so the command line the new root comes up with is the one
+# already running, and for a pivot from the boot menu that is the menu's own. Without this a
+# pivoted boot could never be blessed: it would spend a try each time and take a working entry to
+# 'bad' in three. /run survives both handovers (switch_root moves it across, soft-reboot keeps it)
+# and is gone by the next real boot, which is exactly the lifetime this fact has.
+BOOT_ENTRY_NOTE=/run/flipper-boot-entry
+
+name_the_boot() {
+    printf '%s\n' "$(entry_id_of "$entry")" > "$BOOT_ENTRY_NOTE" 2>/dev/null \
+        || say "could not write $BOOT_ENTRY_NOTE, so this boot cannot be blessed"
+    return 0
+}
+
 # Mount nothing, load nothing: write down what init needs and ask it to take over.
 pivot_switch_root() {
     drop_armed_image
     _init=$(pivot_init)
     say "pivot into $arg by switch_root: kernel $RUNNING and its device tree are live, init $_init"
+    count_attempt
     # In the initramfs root, not /run: the shutdown pass init runs before boot-pivot unmounts
     # /run, and rootfs is the one thing that survives it.
     printf 'DEV=%s\nSUBVOL=%s\nINIT=%s\n' "$ROOTDEV" "$arg" "$_init" > "$PIVOT_REQ" \
@@ -451,6 +528,7 @@ pivot_switch_root() {
 pivot_soft_reboot() {
     drop_armed_image
     say "pivot into $arg with soft-reboot: kernel $RUNNING and its device tree stay up"
+    count_attempt
     mkdir -p /run/nextroot
     _err=$(mount -t btrfs -o "rw,subvol=$arg" "$ROOTDEV" /run/nextroot 2>&1) \
         || die "cannot mount $arg at /run/nextroot: $_err"
@@ -702,6 +780,7 @@ fi
 # initramfs does not.
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     say "kexec into $arg, handing over with systemctl kexec"
+    count_attempt
     exec systemctl kexec
 fi
 
@@ -710,6 +789,7 @@ fi
 # now, because `kexec -e` never returns and the EXIT trap would never run, leaving a mount for the
 # new kernel to find dirty.
 say "kexec into $arg, no systemd, jumping straight in"
+count_attempt
 top_cleanup
 trap - EXIT INT TERM HUP
 

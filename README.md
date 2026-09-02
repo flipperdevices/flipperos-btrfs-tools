@@ -6,6 +6,8 @@ streams that move them between devices, and the BLS boot entries that make them 
 `scripts/` holds the tools, all POSIX sh, all with `-h/--help`. `libs/` holds the libraries they, the
 hooks and the image build source, plus one awk helper that is read rather than sourced.
 `hooks/` holds the kernel-install plugins that run when a kernel package is installed or removed.
+`systemd/` holds the one unit that has to run inside a booted profile. `tests/` holds shell tests
+that need no device.
 
 ## Where the files go on the device
 
@@ -17,9 +19,16 @@ This is a source layout, not the install layout. Every file refers to the others
 | `scripts/*` | `/usr/local/sbin/` | 0755 |
 | `libs/*` | `/usr/lib/` | 0644 |
 | `hooks/*` | `/etc/kernel/install.d/` | 0755 |
+| `systemd/*` | `/usr/lib/systemd/system/` | 0644 |
 
 `kernel-install` runs the hooks from `/etc/kernel/install.d` by name, so their `NN-` prefixes set the
 order and have to survive the copy.
+
+Two units have to be enabled for boot counting to close its loop:
+`flipper-bless-boot.service`, which ships here, and Debian's own
+`systemd-boot-check-no-failures.service`, which ships disabled. Without the first, an entry keeps
+spending tries on boots that worked; without the second, "the boot worked" means only that the
+system reached multi-user, not that nothing failed on the way.
 
 ## The tools
 
@@ -31,6 +40,9 @@ order and have to survive the copy.
 | `migrate-profile` | carry a profile's changes onto a newer base |
 | `btrfs-maintenance`, `btrfs-show-space` | scrub, dedup, balance, usage |
 | `add-dtbo` | per-profile device-tree overlay drop-ins |
+| `set-boot-order` | which profile boots by itself, and which kernel it boots |
+| `boot-profile` | boot an entry now, by kexec or by pivot |
+| `flipper-bless-boot` | run once per good boot, from the unit of the same name |
 | `apt-backup-profile` | the backup apt offers before it changes packages |
 
 Every tool takes `-d/--device DEV` to operate on a filesystem other than the booted one, which is how
@@ -54,6 +66,45 @@ executable before calling it, and the script asks nothing unless apt is about to
 **`flipper-profiles` stays in the image.** `flipper-bls.sh` reads `/etc/kernel/flipper-profiles` for
 the menu bands and session of each profile. That file describes a particular image's profiles, so it
 ships from flipperone-linux-build-scripts, not from here.
+
+## The boot order is the state
+
+There is no marker anywhere saying what boots. Entries are sorted, and **the first entry boots**:
+
+    sort-key   debian-0100-Desktop-0
+               │      │└┬┘ └──┬──┘ └── rank:     0 = the profile's chosen kernel, 1 = its others
+               │      │ │     └─────── profile
+               │      │ └───────────── band, ascending: 1000 - the filename band
+               │      └─────────────── autoboot: 0 for the profile that boots by itself
+               └────────────────────── the os-release id, which the BLS spec asks for and allows
+                                        to carry "an additional suffix"
+
+`set-boot-order --autoboot @Profile` moves the single 0 in the autoboot column; `--kernel <id>`
+moves the single 0 in one profile's rank column; `--list` prints the order, first line first;
+`--init` stamps a filesystem whose entries predate the scheme.
+
+Installing a kernel makes it the one its profile boots: the hook writes the new entry at rank 0,
+steps the profile's other entries down to rank 1, and gives it a full boot counter. If it cannot
+boot three times running, it becomes 'bad', sorts last, and the kernel that was booting before
+leads again with nothing to undo. Which profile boots by itself is untouched by an install.
+
+A boot names its entry as `flipper.entry=<id>` on the kernel command line, and a pivot -- which
+boots no kernel and so inherits the command line of whatever was running -- leaves the same id in
+`/run/flipper-boot-entry`. `flipper-bless-boot` reads whichever is there. Without the second, a
+pivoted boot would spend a try it could never bless and take a working entry to 'bad' in three.
+
+Attempts are counted the way the spec describes, in the entry's file name:
+`…-7.2.0-ga0d2d145deeb+2-1.conf` has two tries left and one spent. `boot-profile` counts one at the
+point of no return, `flipper-bless-boot` removes the counter after a boot that reached
+`boot-complete.target`, and an entry at zero sorts after everything else -- so a kernel that will
+not boot hands the device back to the one that did, with nothing recording that it happened.
+
+`libs/flipper-blsname.sh` is that vocabulary, and nothing else: entry ids, counters, sort-keys,
+the sort itself, and the kernel floor (`BLS_MIN_KERNEL`, 7.0) that keeps a tool from choosing a
+kernel the boot menu hides. It is deliberately free of `die()` and `log()` so `boot-profile` and
+`set-boot-order` can source it without inheriting a library's error style, and it is the only
+place any of those formats are written down. `tests/entry-names.sh` checks it against names shaped
+like the real ones and needs no device.
 
 `booted_subvol` and `booted_fsuuid` live in `libs/flipper-rootinfo.sh`, which both libs source.
 Both need them and neither can source the other, so the pair has its own file; it must stay free of

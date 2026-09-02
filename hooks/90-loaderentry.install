@@ -55,8 +55,9 @@ mkdir -p "$ENTRIES" || die "could not create '$ENTRIES'"
 # Base cmdline shared by every entry (profiles append their rootflags=subvol=).
 compute_base_opts
 
-# Standard BLS sort-key (os-release IMAGE_ID, else ID).
-SORT_KEY="$(os_sort_key)"
+# The os-release half of the sort-key (IMAGE_ID, else ID); the rest is composed below, once the
+# root this entry is for is known.
+SORT_KEY_OS="$(os_sort_key)"
 
 # devicetree (single, optional): copied into the entry dir (the only thing that still uses it, so
 # create it on demand rather than relying on kernel-install's core having made it).
@@ -80,6 +81,12 @@ discover_devicetreedir
 # the booted root to a profile line for its title/overlays, else treat it as a clone (title = name).
 CUR_SUBVOL="$(booted_subvol)"
 [ -n "$CUR_SUBVOL" ] || die "cannot determine current root subvol (findmnt)"
+
+# The key that places this entry in the boot order: this profile's autoboot digit and band as its
+# existing entries have them, and rank 1 unless this is the profile's first kernel. Installing a
+# kernel therefore never changes what boots -- it has to be chosen in Config first. The band comes
+# from the entry token, which /etc/kernel/entry-token pins per profile.
+SORT_KEY="$(entry_sort_key "$CUR_SUBVOL" "$(token_band "$ENTRY_TOKEN")")"
 
 # kernel + initrd from this root's own /usr/lib/modules/<ver>/, else /boot (resolve_kernel_paths)
 resolve_kernel_paths "$CUR_SUBVOL"

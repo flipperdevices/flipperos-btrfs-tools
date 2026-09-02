@@ -11,6 +11,10 @@
 
 [ -r /usr/lib/flipper-rootinfo.sh ] || { echo "flipper-bls: /usr/lib/flipper-rootinfo.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-rootinfo.sh
+# Entry names, boot counters and sort-keys: shared with boot-profile and set-boot-order, which read
+# and write the same two names without wanting the rest of this library.
+[ -r /usr/lib/flipper-blsname.sh ] || { echo "flipper-bls: /usr/lib/flipper-blsname.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-blsname.sh
 
 VENDOR=rockchip
 TITLE_MAX="${FLIPPER_TITLE_MAX:-26}"
@@ -31,14 +35,57 @@ has_config() { [ -f "$KCONFIG" ] && grep -q "^CONFIG_$1=[ym]" "$KCONFIG"; }
 # Last rootflags=subvol= value in a cmdline/options string (empty if none).
 subvol_of() { printf '%s' "$1" | tr ' ' '\n' | sed -n 's/^rootflags=subvol=//p' | tail -n1; }
 
-# BLS sort-key from os-release (IMAGE_ID, else ID); empty if the root has no os-release.
-# $1 = mounted root to describe (default /). Reads the TARGET's os-release and nothing else: under
-# -d the running root is a different image entirely, and in a recovery boot its ID is the recovery
-# system's, so borrowing it would put the wrong name on the entry rather than no name at all.
-os_sort_key() {
-    _osr="${1:-}/etc/os-release"
-    [ -r "$_osr" ] || { log "no os-release in ${1:-/}, entry gets no sort-key"; return 0; }
-    ( . "$_osr"; printf '%s' "${IMAGE_ID:-$ID}" ) || :
+# ── Where a new entry lands in the order ───────────────────────────────────────────────────────
+#
+# See flipper-blsname.sh for what the sort-key and the boot counter mean. What is here is the half
+# that has to read the filesystem: which digit a profile's existing entries carry, and whether it
+# has a chosen kernel already.
+
+# The autoboot digit a profile's entries already carry, or 1 for a profile with none yet.
+#
+# A kernel install joins the order rather than changing it: whatever boots by itself keeps booting
+# by itself. The invariant that exactly one profile holds the 0 is set-boot-order's business, not
+# this one's -- here a profile with no entries is simply not the one that boots.
+profile_auto_digit() {  # $1 = subvol
+    for _c in "${ENTRIES:-/boot/loader/entries}"/*.conf; do
+        [ -f "$_c" ] || continue
+        [ "$(entry_subvol_of "$_c")" = "$1" ] || continue
+        _a="$(sort_key_field "$_c" auto)"
+        case "$_a" in 0|1) printf '%s' "$_a"; return 0 ;; esac
+    done
+    printf '1'
+}
+
+# Step every other entry of $1 down to rank 1, leaving $2 the profile's chosen kernel.
+#
+# A kernel you have just installed is the kernel you meant to boot, so a new entry leads its
+# profile. What makes that safe rather than reckless is the boot counter it is written with: three
+# attempts, and if it cannot reach boot-complete.target in three it becomes 'bad', sorts last, and
+# the kernel that was booting before -- still blessed, still rank 1 -- leads again on its own.
+demote_others() {  # $1 = subvol, $2 = the id that keeps rank 0
+    for _c in "${ENTRIES:-/boot/loader/entries}"/*.conf; do
+        [ -f "$_c" ] || continue
+        [ "$(entry_subvol_of "$_c")" = "$1" ] || continue
+        [ "$(entry_id_of "$_c")" = "$2" ] && continue
+        [ "$(sort_key_field "$_c" rank)" = 1 ] && continue
+        restamp_entry "$_c" '-' 1 '-' "${OVERLAY_USER_ROOT:-}"
+        log "stepped $(entry_id_of "$_c") down: $2 is newer"
+    done
+    return 0
+}
+
+# The sort-key for an entry of $1 (subvol) in band $2 (a filename band NN, may be empty).
+#
+# The autoboot digit is whatever this profile's entries already carry: installing a kernel changes
+# which kernel a profile boots, never which profile the machine boots by itself.
+#
+# An unmappable root gets band 999, which sorts last: a profile the band scheme cannot place must
+# not become the thing that boots by itself just because its key came out short.
+entry_sort_key() {  # $1 = subvol, $2 = filename band NN
+    _b="$(sort_band "${2:-}")"; [ -n "$_b" ] || _b=999
+    # Rank 0: the entry being written is the one its profile is to boot. demote_others puts the
+    # profile's older entries behind it once this one exists.
+    make_sort_key "$(profile_auto_digit "$1")" "$_b" "$1" "0"
 }
 
 # Set DTB_DIR + DTB_DIRS (primary dir + modules fallback) for the current $KERNEL_VERSION.
@@ -90,9 +137,7 @@ remove_entries() {  # $1 = subvol  $2 = version
     for _c in "${ENTRIES:-/boot/loader/entries}"/*.conf; do
         [ -f "$_c" ] || continue
         [ "$(awk '$1=="version"{print $2; exit}' "$_c")" = "$2" ] || continue
-        _es="$(awk '$1=="options"{for(i=2;i<=NF;i++) if($i ~ /^rootflags=subvol=/) s=$i}
-                    END{sub(/^rootflags=subvol=/,"",s); print s}' "$_c")"
-        [ "$_es" = "$1" ] && rm -f "$_c" || true
+        [ "$(entry_subvol_of "$_c")" = "$1" ] && rm -f "$_c" || true
     done
     return 0   # a non-matching last entry must not fail the loop under set -e
 }
@@ -105,9 +150,7 @@ remove_root_entries() {  # $1 = subvol
     [ -n "$1" ] || return 0
     for _c in "${ENTRIES:-/boot/loader/entries}"/*.conf; do
         [ -f "$_c" ] || continue
-        _es="$(awk '$1=="options"{for(i=2;i<=NF;i++) if($i ~ /^rootflags=subvol=/) s=$i}
-                    END{sub(/^rootflags=subvol=/,"",s); print s}' "$_c")"
-        [ "$_es" = "$1" ] || continue
+        [ "$(entry_subvol_of "$_c")" = "$1" ] || continue
         _lx="$(awk '$1=="linux"{print $2; exit}' "$_c")"
         rm -f "$_c"; echo "removed boot entry $_c" >&2
         case "$_lx" in /boot/*/*/linux)
@@ -202,8 +245,14 @@ make_title() {
 }
 
 # write_entry FILE TITLE OPTIONS FDTOVERLAYS
+#
+# The entry names itself on the kernel command line as flipper.entry=<id>: that is how
+# flipper-bless-boot knows which file to bless once the boot is good, and there is nothing else in
+# a booted system that says which entry it came from. Added here rather than in the base options,
+# so it cannot leak into anything that compares command lines between entries.
 write_entry() {
     _f="$1"; _title="$2"; _opts="$3"; _fdtov="$4"
+    _opts="$_opts flipper.entry=$(entry_id_of "$_f")"
     # devicetreedir is prefixed with THIS entry's root subvol (U-Boot reads subvolid 5)
     _dtdir=""; [ -n "$DEVICETREEDIR_REL" ] && _dtdir="$(fdt_prefix "$_opts")$DEVICETREEDIR_REL"
     {
@@ -389,7 +438,12 @@ emit_entry() {
 
     _opts="$BASE_OPTS"
     [ -n "$_extra" ] && _opts="$_opts $_extra"
-    _fn="$ENTRIES/$ENTRY_TOKEN-$KERNEL_VERSION.conf"
+    # A new entry is untried, so it is written with a full counter. Anything already there for this
+    # id goes first, counter or not: the id is what identifies an entry, and two files for one id
+    # would both be listed.
+    _id="$ENTRY_TOKEN-$KERNEL_VERSION"
+    for _old in $(entry_files_for "$_id"); do rm -f "$_old"; done
+    _fn="$ENTRIES/$_id$(new_counter).conf"
     if [ "$_ovl_override" = 1 ]; then
         _line="$5"
     else
@@ -403,6 +457,8 @@ emit_entry() {
         _line="$(dt_overlay_line "$_opts" "$_dtbos")"
     fi
     write_entry "$_fn" "$(make_title "$_suf")" "$_opts" "$_line"
+    # This entry is the profile's chosen kernel now, so the rest of its entries are not.
+    demote_others "$(subvol_of "$_opts")" "$_id"
 }
 
 # flipper_write_entry <subvol> <mounted-path> [<origin-hint>]: write a BLS entry for an EXISTING
@@ -426,12 +482,14 @@ flipper_write_entry() {
     [ -n "$KERNEL_VERSION" ] || { echo "flipper-bls: no /usr/lib/linux-image-* inside $_name" >&2; return 1; }
     resolve_kconfig "$_snap"
     set_dtb_dirs
-    SORT_KEY="$(os_sort_key "$_snap")"
+    SORT_KEY_OS="$(os_sort_key "$_snap")"
     # The band comes from the profile list, which lives INSIDE a profile, not in the /etc of
     # whatever is running. Under -d the running root may have no list at all (recovery), and an
     # empty band silently drops the sort prefix from the entry filename.
     PROFILES="${PROFILES:-$(target_profiles "$_snap")}"
-    ENTRY_TOKEN="$(make_token "$(clone_slot "$_snap" "$_origin")" "$_name")"
+    _nn="$(clone_slot "$_snap" "$_origin")"
+    ENTRY_TOKEN="$(make_token "$_nn" "$_name")"
+    SORT_KEY="$(entry_sort_key "$_name" "$_nn")"
     mkdir -p "$ENTRIES" || { echo "flipper-bls: cannot create $ENTRIES" >&2; return 1; }
     compute_base_opts
     resolve_kernel_paths "$_name" "$_snap" || return 1
@@ -490,7 +548,7 @@ flipper_rewrite_overlay() {
     for _f in "$ENTRIES"/*.conf; do
         [ -f "$_f" ] || continue
         _opts="$(sed -n 's/^options[[:space:]]*//p' "$_f")"
-        [ "$(subvol_of "$_opts")" = "$_sv" ] || continue
+        [ "$(entry_subvol_of "$_f")" = "$_sv" ] || continue
         KERNEL_VERSION="$(sed -n 's/^version[[:space:]]*//p' "$_f")"
         [ -n "$KERNEL_VERSION" ] || continue
         [ "$_scope" = all ] || [ "$KERNEL_VERSION" = "$_run" ] || continue
@@ -498,6 +556,8 @@ flipper_rewrite_overlay() {
         _line="$(dt_overlay_line "$_opts" "$_dtbos")"
         sed -i '/^devicetree-overlay[[:space:]]/d' "$_f"
         [ -n "$_line" ] && printf 'devicetree-overlay %s\n' "$_line" >>"$_f"
+        # The device tree this entry boots with just changed, so the boot is on trial again.
+        _f="$(rearm_entry "$_f")"
         _n=$((_n + 1)); echo "flipper-bls: updated ${_f##*/}"
     done
     [ "$_n" -gt 0 ] || { echo "flipper-bls: no matching entries for $_sv" >&2; return 1; }

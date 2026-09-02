@@ -1,0 +1,42 @@
+[Unit]
+Description=Bless the boot entry this boot came from
+Documentation=man:systemd.special(7)
+# Nothing to bless in a system that was not booted from one of our entries: a recovery boot, or a
+# kernel started by hand. Either source will do, so both conditions are triggering ones (the '|'):
+# a kexec'd boot names its entry on the command line, a pivoted one cannot and leaves a note in
+# /run instead.
+ConditionKernelCommandLine=|flipper.entry
+ConditionPathExists=|/run/flipper-boot-entry
+
+# boot-complete.target is what decides whether this boot counts as good, and with
+# systemd-boot-check-no-failures.service enabled it is only reached when no unit failed. Requires=
+# rather than Wants=, so a boot that fails the check does not bless the entry and the next boot
+# spends another of its tries.
+Requires=boot-complete.target
+After=boot-complete.target
+
+# Load-bearing, and the reason this unit did nothing on its first real boot: a target is implicitly
+# ordered AFTER the units it wants, so a service inside multi-user.target that waits for
+# boot-complete.target -- which is only reached after multi-user.target, by way of
+# systemd-boot-check-no-failures.service -- is a cycle. systemd breaks a cycle by deleting a job,
+# and the job it deleted was this one:
+#
+#   multi-user.target: Found ordering cycle on flipper-bless-boot.service/start
+#   Job flipper-bless-boot.service/start deleted to break ordering cycle
+#
+# Opting out of the default dependencies takes this unit out of that ordering, which is what
+# systemd's own systemd-bless-boot.service does for the same reason. The two lines after it are
+# what DefaultDependencies= would otherwise have supplied, so the unit still goes away cleanly at
+# shutdown.
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/flipper-bless-boot
+
+[Install]
+# The target is passive: something has to pull it in, and this is that something.
+WantedBy=multi-user.target

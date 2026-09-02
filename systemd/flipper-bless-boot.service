@@ -1,12 +1,17 @@
 [Unit]
 Description=Bless the boot entry this boot came from
 Documentation=man:systemd.special(7)
-# Nothing to bless in a system that was not booted from one of our entries: a recovery boot, or a
-# kernel started by hand. Either source will do, so both conditions are triggering ones (the '|'):
-# a kexec'd boot names its entry on the command line, a pivoted one cannot and leaves a note in
-# /run instead.
-ConditionKernelCommandLine=|flipper.entry
-ConditionPathExists=|/run/flipper-boot-entry
+# No conditions, deliberately. Whether there is anything to bless is a question about the entries
+# on disk, and no Condition can ask it: a kexec'd boot names its entry on the command line, but a
+# pivoted one boots no kernel and so inherits the command line it was started from, and the note
+# the tool leaves in /run does not survive init's shutdown pass and switch_root. Conditioning on
+# either of those is how this unit came to be skipped on exactly the boots it was written for:
+#
+#   flipper-bless-boot.service … skipped, no trigger condition checks were met.
+#
+# So it always runs, and the script decides: it works the entry out from the running kernel and
+# the booted subvolume, and says so and exits 0 when nothing matches -- a recovery boot, or a
+# kernel started by hand.
 
 # boot-complete.target is what decides whether this boot counts as good, and with
 # systemd-boot-check-no-failures.service enabled it is only reached when no unit failed. Requires=

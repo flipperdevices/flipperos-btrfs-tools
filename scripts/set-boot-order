@@ -88,9 +88,12 @@ case "$_action" in
                 '') _t='-' ;;
                 0)  _t='bad' ;;
             esac
-            printf '%-30s %-5s %-6s %s\n' \
+            _note=""
+            version_at_least "$(sed -n 's/^version[[:space:]]\{1,\}//p' "$_f" | head -n1)" \
+                || _note="  (below $BLS_MIN_KERNEL, not shown by the menu)"
+            printf '%-30s %-5s %-6s %s%s\n' \
                 "$(sed -n 's/^sort-key[[:space:]]\{1,\}//p' "$_f" | head -n1 | sed 's/^$/-/')" \
-                "$_mark" "$_t" "$(entry_id_of "$_f")"
+                "$_mark" "$_t" "$(entry_id_of "$_f")" "$_note"
         done
         ;;
     autoboot)

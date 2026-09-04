@@ -123,6 +123,16 @@ ck "both tokens removed" "$(ls "$d" | grep -c 'flipperos-Minimal-7.2.0-a' || tru
 ck "rearm blessed" "$(basename "$(rearm_entry "$d/800-flipperos-TV-Media-Box-7.2.0-a.conf")")" "800-flipperos-TV-Media-Box-7.2.0-a+3-0.conf"
 ck "rearm tried"   "$(basename "$(rearm_entry "$d/900-flipperos-Desktop-7.2.0-a+3-0.conf")")"  "900-flipperos-Desktop-7.2.0-a+3-0.conf"
 
+# The order: a good mainline kernel first, then one that has spent its tries, and a kernel
+# below the floor last even with every try left, since the menu would not show it.
+rm -rf "$d"; d=$(mktemp -d); ENTRIES="$d"
+mk "900-flipperos-Desktop-7.2.0-a+0-3.conf" "debian-0100-Desktop-0" "@Desktop"; printf 'version 7.2.0-a\n' >> "$d/900-flipperos-Desktop-7.2.0-a+0-3.conf"
+mk "900-flipperos-Desktop-6.1.172+3-0.conf" "debian-0100-Desktop-1" "@Desktop"; printf 'version 6.1.172\n' >> "$d/900-flipperos-Desktop-6.1.172+3-0.conf"
+mk "800-flipperos-TV-Media-Box-7.2.0-a.conf" "debian-1200-TV-Media-Box-0" "@TV-Media-Box"; printf 'version 7.2.0-a\n' >> "$d/800-flipperos-TV-Media-Box-7.2.0-a.conf"
+ck "order first"  "$(basename "$(sorted_entries | sed -n 1p)")" "800-flipperos-TV-Media-Box-7.2.0-a.conf"
+ck "order second" "$(basename "$(sorted_entries | sed -n 2p)")" "900-flipperos-Desktop-7.2.0-a+0-3.conf"
+ck "order last"   "$(basename "$(sorted_entries | sed -n 3p)")" "900-flipperos-Desktop-6.1.172+3-0.conf"
+
 rm -rf "$d"
 [ "$fail" = 0 ] && echo "all key helpers ok" || echo "FAILURES"
 exit "$fail"

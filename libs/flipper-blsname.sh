@@ -133,22 +133,26 @@ decrement_entry() {
 }
 
 # The boot order, one path per line, first line boots. flipctl implements the same rule:
-#   1. no tries left sorts after everything else     (the spec)
-#   2. sort-key ascending                            (the spec)
-#   3. kernel version descending, as far as it compares
-#   4. newest file first, separating two builds of one version
-#   5. file name descending                          (the spec's last resort)
+#   1. a kernel below the floor sorts after everything else: the menu does not show it
+#   2. no tries left sorts after everything else     (the spec)
+#   3. sort-key ascending                            (the spec)
+#   4. kernel version descending, as far as it compares
+#   5. newest file first, separating two builds of one version
+#   6. file name descending                          (the spec's last resort)
 sorted_entries() {
     for _f in "${ENTRIES:-/boot/loader/entries}"/*.conf; do
         [ -f "$_f" ] || continue
+        _ver="$(sed -n 's/^version[[:space:]]\{1,\}//p' "$_f" | head -n1)"
+        _old=0; version_at_least "$_ver" || _old=1
         _bad=0; [ "$(entry_tries_of "$_f")" = 0 ] && _bad=1
-        printf '%s|%s|%s|%s|%s\n' \
+        printf '%s|%s|%s|%s|%s|%s\n' \
+            "$_old" \
             "$_bad" \
             "$(sed -n 's/^sort-key[[:space:]]\{1,\}//p' "$_f" | head -n1)" \
-            "$(version_rank "$(sed -n 's/^version[[:space:]]\{1,\}//p' "$_f" | head -n1)")" \
+            "$(version_rank "$_ver")" \
             "$(stat -c %Y "$_f" 2>/dev/null || echo 0)" \
             "$_f"
-    done | sort -t'|' -k1,1n -k2,2 -k3,3r -k4,4nr -k5,5r | cut -d'|' -f5-
+    done | sort -t'|' -k1,1n -k2,2n -k3,3 -k4,4r -k5,5nr -k6,6r | cut -d'|' -f6-
     return 0
 }
 

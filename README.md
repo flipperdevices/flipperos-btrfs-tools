@@ -97,8 +97,10 @@ goes on the kernel command line.
 Attempts are counted the way the spec describes, in the entry's file name:
 `…-7.2.0-ga0d2d145deeb+2-1.conf` has two tries left and one spent. `boot-profile` counts one at the
 point of no return, `flipper-bless-boot` removes the counter after a boot that reached
-`boot-complete.target`, and an entry at zero sorts after everything else -- so a kernel that will
-not boot hands the device back to the one that did, with nothing recording that it happened.
+`boot-complete.target`, and an entry at zero sorts after everything else, so a kernel that will
+not boot hands the device back to the one that did, with nothing recording that it happened. An
+entry for a kernel below the floor sorts after even those: the menu does not show it, so no tool
+may choose it for anybody either.
 
 `libs/flipper-blsname.sh` is that vocabulary, and nothing else: entry ids, counters, sort-keys,
 the sort itself, and the kernel floor (`BLS_MIN_KERNEL`, 7.0) that keeps a tool from choosing a

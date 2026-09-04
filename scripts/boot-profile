@@ -14,11 +14,10 @@
 #           on this board costs. switch_root from the boot menu's initramfs, systemd's
 #           soft-reboot from a booted profile.
 #   kexec   Everything else, and the only way to boot a profile with a kernel or a device
-#           tree of its own: assemble that device tree (the booted profile's is the live one,
-#           any other profile's is the board base dtb + the entry's overlays via fdtoverlay),
-#           load it with
-#           kexec and hand over with `systemctl kexec` where systemd is running (clean shutdown,
-#           nothing reserved) or `kexec -e` where it is not.
+#           tree of its own: assemble that device tree (the board base dtb plus the entry's
+#           overlays, via fdtoverlay), load it with kexec and hand over with `systemctl kexec`
+#           where systemd is running (clean shutdown, nothing reserved) or `kexec -e` where it
+#           is not.
 #
 # Which one it took, or the exact reason pivot was refused, is always said out loud: to stderr and
 # to /dev/kmsg. --dry-run reports the decision and validates whatever that decision needs without
@@ -215,9 +214,11 @@ K="$TOP$K_REL"; I="$TOP$I_REL"
 #   cannot be given one, and one naming none has its dtb checked for the same board rather
 #   than compared as source. The command line is not compared at all: it is the FIT's, so it
 #   is nobody's profile, and a profile pivoted from the menu runs with the menu's parameters.
-#   From a booted profile the record is that profile's own entry, so the two entries' device
-#   trees are compared instead: paths, and the bytes of every overlay they name, since a path
-#   means a different file in each root. Command lines are compared too, and any difference
+#   From a booted profile there is a record of it: /sys/firmware/fdt is the tree this kernel
+#   was given. So the entry's tree is assembled and compared with that, as source. Comparing
+#   the entry files instead let a Video Out change pivot: a profile is booted from the entry it
+#   booted from, so the comparison was with itself and always agreed, and an overlay added or
+#   dropped since that boot went unnoticed. Command lines are compared too, and any difference
 #   either way refuses.
 PIVOT_HELPER=/usr/bin/boot-pivot
 PIVOT_REQ=/flipper-pivot
@@ -290,46 +291,6 @@ cmdline_diff() {
         "$_extra" "$([ "$(echo $_extra | wc -w)" = 1 ] && echo it || echo them)"
 }
 
-# /@X/usr/lib/... -> /usr/lib/...: every entry prefixes its device tree paths with its own root
-# subvol, because U-Boot reads the btrfs top level, so those prefixes always differ between
-# two profiles and never mean a different device tree.
-strip_subvol() {
-    case "$1" in
-        /@*/*) printf '/%s' "${1#/@*/}" ;;
-        *)     printf '%s' "$1" ;;
-    esac
-}
-
-# The device tree an entry asks for: one path per line, kind first, prefixes removed, sorted.
-tree_spec() {
-    sed -n 's/^devicetree[[:space:]]\{1,\}/dt /p
-            s/^devicetreedir[[:space:]]\{1,\}/dtdir /p
-            s/^devicetree-overlay[[:space:]]\{1,\}/ovl /p' "$1" \
-    | while read -r _k _rest; do
-          for _p in $_rest; do printf '%s %s\n' "$_k" "$(strip_subvol "$_p")"; done
-      done | sort
-}
-
-# The overlays an entry names, prefixes intact so the files can be read, sorted the way
-# tree_spec sorts them: within one entry every path shares a prefix, so this is the same order.
-ovl_list() {
-    sed -n 's/^devicetree-overlay[[:space:]]\{1,\}//p' "$1" | head -n1 \
-        | tr ' ' '\n' | grep -v '^$' | sort
-}
-
-# The entry this system booted from: the profile mounted at / with the kernel that is running.
-booted_entry() {
-    _sv=$(findmnt -no FSROOT / 2>/dev/null); _sv=${_sv#/}
-    [ -n "$_sv" ] || return 1
-    for _e in "$ENTRIES"/*.conf; do
-        [ -f "$_e" ] || continue
-        grep -qE "rootflags=subvol=$_sv( |\$)" "$_e" 2>/dev/null || continue
-        [ "$(sed -n 's/^version[[:space:]]\{1,\}//p' "$_e" | head -n1)" = "$RUNNING" ] || continue
-        printf '%s' "$_e"; return 0
-    done
-    return 1
-}
-
 # A device tree without the parts the loader writes per boot, so two can be compared. /memory
 # and /chosen are filled in from what the SoC reports and what the loader was told, and the
 # memreserve directives describe this boot's initrd. None of them say which device tree this is.
@@ -352,13 +313,20 @@ live_tree_is() {  # $1 = dtb file
     command -v dtc >/dev/null 2>&1 \
         || { printf 'no dtc to compare the live device tree with'; return 1; }
     [ -r /sys/firmware/fdt ] || { printf 'no /sys/firmware/fdt to compare against'; return 1; }
-    _lv=$(mktemp /tmp/boot-profile.XXXXXX.lv.dts); _pf=$(mktemp /tmp/boot-profile.XXXXXX.pf.dts)
-    TOP_TMPFILES="${TOP_TMPFILES:-} $_lv $_pf $_lv.s $_pf.s"
-    dtc -I dtb -O dts -o "$_lv" /sys/firmware/fdt 2>/dev/null \
-        || { printf 'the live device tree will not decompile'; return 1; }
-    dtc -I dtb -O dts -o "$_pf" "$1" 2>/dev/null \
-        || { printf 'the device tree %s names will not decompile' "$arg"; return 1; }
-    strip_loader_nodes "$_lv" > "$_lv.s"; strip_loader_nodes "$_pf" > "$_pf.s"
+    # Beside the dtb rather than mktemp of their own: this runs inside a command substitution,
+    # where an addition to TOP_TMPFILES is lost with the subshell, so whoever owns $1 owns these.
+    _lv="$1.lv.dts"; _pf="$1.pf.dts"
+    # The two sides are independent and this board has eight cores, so decompile and strip both
+    # at once: the compare then costs one side rather than two, and it is on the path of every
+    # boot the menu decides.
+    { dtc -I dtb -O dts -o "$_lv" /sys/firmware/fdt 2>/dev/null \
+        && strip_loader_nodes "$_lv" > "$_lv.s"; } & _lvp=$!
+    { dtc -I dtb -O dts -o "$_pf" "$1" 2>/dev/null \
+        && strip_loader_nodes "$_pf" > "$_pf.s"; } & _pfp=$!
+    _lvr=0; wait "$_lvp" || _lvr=$?
+    _pfr=0; wait "$_pfp" || _pfr=$?
+    [ "$_lvr" = 0 ] || { printf 'the live device tree will not decompile'; return 1; }
+    [ "$_pfr" = 0 ] || { printf 'the device tree %s names will not decompile' "$arg"; return 1; }
     if ! cmp -s "$_lv.s" "$_pf.s"; then
         # Say what differs, not just that something does. Without this the refusal is
         # unactionable: the device tree is 10,000 lines and the difference has twice turned
@@ -398,6 +366,34 @@ same_board() {  # $1 = dtb file
     return 0
 }
 
+# The device tree an entry asks for: the board base dtb plus every overlay it names. Says
+# nothing and grafts nothing, so the answer is the same whether it is about to be compared with
+# the live tree or handed to kexec. The reason goes to stdout when it cannot be built.
+assemble_tree() {  # $1 = output dtb
+    _base=$(base_dtb)
+    [ -f "$_base" ] || { printf 'base device tree not found: %s' "${_base#$TOP}"; return 1; }
+    # An overlay is applied by resolving the labels it references against the base, so the base
+    # has to carry the symbol table dtc writes with -@. Kernels built without it ship dtbs less
+    # than half the size and no /__symbols__, and every overlay against them fails the same way,
+    # deep inside fdtoverlay. Say it here, where the answer is actionable: the profile needs a
+    # kernel whose dtbs carry symbols.
+    if [ -n "$OVL_REL" ] && command -v fdtget >/dev/null 2>&1; then
+        fdtget -l "$_base" / 2>/dev/null | grep -qx '__symbols__' \
+            || { printf '%s has no symbol table (dtc -@); no overlay can apply' "${_base#$TOP}"
+                 return 1; }
+    fi
+    say "device tree: assembling ${_base#$TOP} plus $(set -- $OVL_REL; echo $#) overlay(s)"
+    _ovl=""
+    for _o in $OVL_REL; do _ovl="$_ovl $TOP$_o"; done
+    [ -n "$_ovl" ] || { cp "$_base" "$1"; return 0; }
+    # fdtoverlay names the file and the reason; without them the failure is unreadable, which is
+    # what sent one card boot looking in the wrong place.
+    # shellcheck disable=SC2086
+    _err=$(fdtoverlay -i "$_base" -o "$1" $_ovl 2>&1) \
+        || { printf 'fdtoverlay failed: %s' "$(printf '%s' "$_err" | tr '\n' ' ')"; return 1; }
+    return 0
+}
+
 # Why the profile's device tree is not the running one, or nothing when it is. The two paths
 # know the live device tree differently, so this is where they part.
 tree_reason() {
@@ -410,20 +406,10 @@ tree_reason() {
         _why=$(same_board "$_base") || printf '%s (%s)' "$_why" "${_base#$TOP}"
         return 0
     fi
-    _live=$(booted_entry) \
-        || { printf 'cannot tell which entry this system booted from (root %s, kernel %s)' \
-                 "$(findmnt -no FSROOT / 2>/dev/null)" "$RUNNING"; return 0; }
-    [ "$(tree_spec "$_live")" = "$(tree_spec "$entry")" ] \
-        || { printf 'its device tree is not the one running'; return 0; }
-    _n=0
-    _lo=$(ovl_list "$_live")
-    for _tp in $(ovl_list "$entry"); do
-        _n=$((_n + 1))
-        _lp=$(printf '%s\n' $_lo | sed -n "${_n}p")
-        cmp -s "$TOP$_lp" "$TOP$_tp" && continue
-        printf 'overlay %s is not the one applied to the live device tree' "${_tp##*/}"
-        return 0
-    done
+    _want=$(mktemp /tmp/boot-profile.XXXXXX.want.dtb)
+    _why=$(assemble_tree "$_want") && _why=$(live_tree_is "$_want") || true
+    rm -f "$_want" "$_want".*
+    printf '%s' "$_why"
     return 0
 }
 
@@ -702,42 +688,12 @@ if armed_for "$arg"; then
     say "kexec into $arg with the image --arm already loaded, nothing to assemble or load"
 else
     DTB=$(mktemp /tmp/boot-profile.XXXXXX.dtb); TOP_TMPFILES="${TOP_TMPFILES:-} $DTB"
-    booted=$(findmnt -no FSROOT / 2>/dev/null); booted=${booted#/}
-    # The running profile's device tree is the live one, but only when this really is the filesystem
-    # we booted from: profile names repeat across filesystems, so a card's @Desktop would otherwise
-    # be handed the
-    # internal @Desktop's device tree.
-    if ! target_fs_differs && [ "$arg" = "$booted" ] && [ -r /sys/firmware/fdt ]; then
-        # the running profile: reuse the live, fully-assembled device tree
-        say "device tree: the live one, since $arg is what is running"
-        cat /sys/firmware/fdt > "$DTB"
-    else
-        # base board dtb, chosen from the running board's first compatible
-        # (e.g. "flipper,one-rev-f0b0c1" -> rk3576-flipper-one-rev-f0b0c1.dtb)
-        base=$(base_dtb)
-        [ -f "$base" ] || die "base device tree not found: ${base#$TOP}"
-        # An overlay is applied by resolving the labels it references against the base, so the
-        # base has to carry the symbol table dtc writes with -@. Kernels built without it ship
-        # dtbs less than half the size and no /__symbols__, and every overlay against them
-        # fails the same way, deep inside fdtoverlay. Say it here, where the answer is
-        # actionable: the profile needs a kernel whose dtbs carry symbols.
-        if [ -n "$OVL_REL" ] && command -v fdtget >/dev/null 2>&1; then
-            fdtget -l "$base" / 2>/dev/null | grep -qx '__symbols__' \
-                || die "${base#$TOP} has no symbol table (dtc -@); no overlay can apply"
-        fi
-        say "device tree: assembling ${base#$TOP} plus $(set -- $OVL_REL; echo $#) overlay(s)"
-        ovl=""
-        for o in $OVL_REL; do ovl="$ovl $TOP$o"; done
-        if [ -n "$ovl" ]; then
-            # fdtoverlay names the file and the reason; without them the failure is
-            # unreadable, which is what sent one card boot looking in the wrong place.
-            _err=$(fdtoverlay -i "$base" -o "$DTB" $ovl 2>&1) \
-                || die "fdtoverlay failed: $(printf '%s' "$_err" | tr '\n' ' ')"
-        else
-            cp "$base" "$DTB"
-        fi
-        graft_firmware_memory "$DTB"
-    fi
+    # Assembled from the entry, never copied from /sys/firmware/fdt, not even for the profile
+    # that is running: the live tree carries whatever the last boot applied, so a profile whose
+    # overlays have changed since it booted would boot again with the old ones. That is the
+    # whole point of taking the kexec path here.
+    _why=$(assemble_tree "$DTB") || die "$_why"
+    graft_firmware_memory "$DTB"
 
     # --kexec-syscall, or the device tree assembled above is thrown away. kexec-tools defaults to
     # kexec_file_load, and on that path arm64 discards a user-supplied dtb on purpose --

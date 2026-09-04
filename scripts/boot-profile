@@ -1,41 +1,23 @@
 #!/bin/sh
-# boot-profile <entry|@profile> - boot directly into a bootable profile, skipping the
-# firmware/U-Boot cycle. What is booted is one BLS entry: it names the kernel, the initrd, the
-# command line and the device tree, and the subvolume its command line mounts is the profile.
-# Naming the entry is how a profile with several kernels installed is booted with the one meant.
-# A @profile (as listed by list-profiles) still works and takes that profile's newest entry.
-# Entries are read from the filesystem the profile is on rather than from /boot, so `-d` boots an
-# SD card's profile with the card's own kernel.
+# boot-profile <entry|@profile>: boot a profile without going through firmware.
 #
-# Two ways over, and the profile's own entry decides which:
+# What boots is one BLS entry: kernel, initrd, command line, device tree, and the
+# subvolume its command line mounts. An entry id names one kernel; @profile takes the
+# profile's entry at the head of the boot order. Entries are read from the filesystem
+# the profile is on, so -d boots a card's profile with the card's own kernel.
 #
-#   pivot   For a profile whose kernel and device tree are the ones already running: put its
-#           root in place and hand PID 1 over, skipping the 3.2s of kernel and initrd a boot
-#           on this board costs. switch_root from the boot menu's initramfs, systemd's
-#           soft-reboot from a booted profile.
-#   kexec   Everything else, and the only way to boot a profile with a kernel or a device
-#           tree of its own: assemble that device tree (the board base dtb plus the entry's
-#           overlays, via fdtoverlay), load it with kexec and hand over with `systemctl kexec`
-#           where systemd is running (clean shutdown, nothing reserved) or `kexec -e` where it
-#           is not.
+# Two ways over. A profile whose kernel and device tree are already running is pivoted
+# into: switch_root from the boot menu's initramfs, systemctl soft-reboot from a booted
+# profile, skipping the 3.2s a kernel boot costs here. Anything else is kexec'd with its
+# own kernel and an assembled device tree. Which way, and why not the other, is said on
+# stderr and in the kernel log.
 #
-# Which one it took, or the exact reason pivot was refused, is always said out loud: to stderr and
-# to /dev/kmsg. --dry-run reports the decision and validates whatever that decision needs without
-# handing over: a pivot has nothing to load, so it stops there, and a kexec assembles the
-# device tree and loads and unloads the image. --no-pivot forces kexec, which is also how to
-# dry-run the kexec path on a machine that would pivot.
-#
-# The loading is also what a boot menu can do before it is asked to boot anything, since it is
-# the slow part and it happens while the machine is idle: measured on this board a kexec boot
-# spends 2.4s of its 13.8s loading, all of it inside the syscall, and none of that is reading
-# files (0.08s cold) or assembling the device tree (0.04s). --arm does everything up to and
-# including the load and stops; a later boot of the same profile finds its image already in the
-# kernel and hands over at once. --disarm discards it. The kernel holds one image at a time, so
-# only one profile can be armed, which is why the menu arms the one it would boot by itself.
+# --dry-run decides and validates without handing over. --no-pivot forces kexec.
+# --arm loads the kexec image and stops, so a later boot hands over at once; loading is
+# 2.4s of a 13.8s kexec boot and can happen while the menu is idle. --disarm discards it.
 set -eu
 [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-btrfs.sh
-# Entry names, the boot counter and the order: shared with the library that writes entries.
 [ -r /usr/lib/flipper-blsname.sh ] || { echo "Error: /usr/lib/flipper-blsname.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-blsname.sh
 
@@ -78,15 +60,11 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-# Where --arm records what it loaded, so a later boot can tell whether the image in the kernel
-# is the one it wants. On tmpfs either side of a handover, which is what makes it truthful: a
-# record surviving into the next boot would describe an image that is no longer loaded.
+# What --arm loaded. On tmpfs, so it cannot outlive the image it describes.
 ARMED=/run/boot-profile.armed
 
-# One image at a time, so discarding is unconditional: the kernel keeps a single kexec_image
-# and there is nothing to name. EBUSY means another process holds the kexec lock, which is a
-# load still running, so wait it out rather than report a failure it will not see again.
-kexec_wait() {  # "$@" = the kexec invocation
+# EBUSY from kexec is another load still running: wait it out.
+kexec_wait() {
     _n=0
     while ! "$@" 2>/dev/null; do
         _n=$((_n + 1))
@@ -115,38 +93,23 @@ case "$arg" in *..*|*/*) die "Invalid name: $arg" ;; esac
 
 need_root
 
-# Everything this decides is said out loud, to stderr for whoever ran it and to the kernel log
-# for whoever reads the boot afterwards. A boot that picks one of two paths and does not say
-# which is a boot nobody can debug from the log alone.
+# To stderr for whoever ran it, to the kernel log for whoever reads the boot afterwards.
 say() {
     echo "boot-profile: $*" >&2
     [ -w /dev/kmsg ] && echo "boot-profile: $*" > /dev/kmsg 2>/dev/null
     return 0
 }
 
-# BLS paths are top-level (/@X/...); read them under a subvolid=5 mount so this works for any
-# profile, booted or not.
+# BLS paths are top-level (/@X/...), so read them under a subvolid=5 mount.
 mount_top
 
-# The entries belong to the filesystem the profile lives on, not to the one we booted from. For the
-# booted filesystem $TOP/boot is the same subvolume that /boot already is, so this is the same file.
-# For any other -- an SD card written with our own image -- it is that card's own entries, which is
-# the only place its paths resolve: a card carries its own kernels, so an entry read from /boot
-# names a version the card does not have, and profile names repeat across filesystems, so the wrong
-# entry is found rather than none.
+# The entries of the filesystem the profile is on: a card carries its own kernels, and
+# profile names repeat across filesystems.
 ENTRIES=$TOP/boot/loader/entries
-# An entry id names one kernel, which is the only way to ask for a kernel that is not the newest
-# and what the boot menu's rows are. A @profile names all of a profile's kernels, so one has to
-# be chosen: the newest by when its entry file was written.
-#
-# Written, not named or versioned: ours are git-describe strings and do not order.
-# 7.2.0-00249-g26619ffca0bd sorts before 7.2.0-ga0d2d145deeb under every rule a machine can
-# apply, digits before letters, and it is the newer kernel of the two. kernel-install writes the
-# entry at install time, so that is the fact that answers "the one just installed".
 case "$arg" in
     @*)
-        # The profile's own place in the boot order: the first of its entries the order gives,
-        # which is the kernel chosen for it (rank 0), or its next one when that one is bad.
+        # The profile's first entry in the boot order: its chosen kernel, or the next
+        # one when that is bad.
         entry=$(
             for _e in $(sorted_entries); do
                 [ "$(entry_subvol_of "$_e")" = "$arg" ] || continue
@@ -157,7 +120,7 @@ case "$arg" in
         [ -n "$entry" ] || die "No boot entry for $arg (see list-profiles)"
         ;;
     *)
-        # An id names one entry whatever counter it carries, and the counter changes under us.
+        # By id, whatever counter the file carries at the moment.
         entry=""
         for _e in $(entry_files_for "${arg%.conf}"); do entry=$_e; done
         [ -n "$entry" ] || die "No boot entry $arg on this filesystem"
@@ -168,76 +131,45 @@ K_REL=$(val linux); I_REL=$(val initrd); OPTS=$(val options)
 DT_REL=$(val devicetree); DTDIR_REL=$(val devicetreedir); OVL_REL=$(val devicetree-overlay)
 [ -n "$K_REL" ]  || die "boot entry has no 'linux' line"
 [ -n "$OPTS" ]   || die "boot entry has no 'options' line"
-# The profile is the subvolume the entry mounts, whichever way it was asked for. Everything
-# after this is about the profile -- whether it can be pivoted into, which root to put in
-# place, what to say is being booted -- and the entry is where that is written down.
+# From here on $arg is the profile: the subvolume the entry mounts.
 arg=$(printf '%s' "$OPTS" | tr ' ' '\n' | sed -n 's/^rootflags=subvol=//p' | cut -d, -f1 | head -n1)
 [ -n "$arg" ] || die "boot entry ${entry##*/} mounts no subvolume"
-# Which entry, in the log as well as on stderr: the id carries the kernel version, so this is
-# the line that says afterwards which kernel a boot actually took.
 say "entry ${entry##*/} mounts $arg"
 K="$TOP$K_REL"; I="$TOP$I_REL"
 [ -f "$K" ] || die "kernel not found: $K_REL"
 [ -z "$I_REL" ] || [ -f "$I" ] || die "initrd not found: $I_REL"
 
-# ── pivot, where the profile needs no kernel boot of its own ───────────────────
-# A profile whose kernel and device tree are already running does not need a second one:
-# put its root in place and hand PID 1 over. Measured on this board a full boot is 3.2s of
-# kernel and initrd before userspace starts, and that is the part this skips.
+# Pivot.
 #
-# Two ways to hand over, because the two places this runs from are not alike:
+# From the boot menu's initramfs the handover is init's: on SIGQUIT BusyBox runs its
+# shutdown actions, kills everything and execs its restart action, boot-pivot, which
+# switch_roots into the profile. From a booted profile it is systemd's soft-reboot with
+# the profile mounted at /run/nextroot.
 #
-#   switch_root   From the boot menu's initramfs. Not pivot_root: the root there is the
-#                 kernel's rootfs, which cannot be moved aside, and switch_root is written
-#                 for exactly that -- it moves /dev, /proc, /sys and /run across, frees the
-#                 initramfs and execs the new init. The exec has to happen in PID 1 or the
-#                 profile's systemd comes up as an ordinary process, and boot-profile is a
-#                 grandchild of init, so the handover is init's: BusyBox execs its first
-#                 `restart` action on SIGQUIT, after the shutdown actions and after killing
-#                 every process, which is also what lets go of the panel. That action is the
-#                 image's boot-pivot, and the request file names what to mount.
-#   soft-reboot   From a booted profile. systemd will not switch root outside an initrd, and
-#                 does not have to: soft-reboot is the supported way to replace userspace
-#                 without touching the kernel. Mount the profile at /run/nextroot and ask;
-#                 systemd stops everything, switches root there and re-executes itself as
-#                 PID 1 inside it.
-#
-# Both keep the running kernel and the running device tree, so both ask the same three
-# questions -- is this the kernel the entry names, does it want an overlay that is not applied,
-# is the live device tree the one it names -- and answer the last one differently, because the
-# two places know the live device tree differently:
-#
-#   From the initramfs there is no record of it. Falcon boots this image from a FIT carrying
-#   U-Boot's control device tree, which describes this board but is not any file a profile
-#   names: it is built from U-Boot's copy of the board source and carries U-Boot's own nodes.
-#   So a profile naming any overlay is refused, since none is applied and a running kernel
-#   cannot be given one, and one naming none has its dtb checked for the same board rather
-#   than compared as source. The command line is not compared at all: it is the FIT's, so it
-#   is nobody's profile, and a profile pivoted from the menu runs with the menu's parameters.
-#   From a booted profile there is a record of it: /sys/firmware/fdt is the tree this kernel
-#   was given. So the entry's tree is assembled and compared with that, as source. Comparing
-#   the entry files instead let a Video Out change pivot: a profile is booted from the entry it
-#   booted from, so the comparison was with itself and always agreed, and an overlay added or
-#   dropped since that boot went unnoticed. Command lines are compared too, and any difference
-#   either way refuses.
+# Both keep the running kernel and device tree, so both ask: is this the kernel the entry
+# names, and is the running tree the one it names. From the menu the running tree is
+# U-Boot's, which is nobody's file and carries no overlay, so an entry wanting overlays
+# is refused and any other is checked for the same board. A profile the menu pivoted into
+# still runs that tree and is judged the same way. Otherwise the entry's tree is assembled
+# and compared with the live one as source, which is what catches an overlay changed since
+# the boot. Command lines are compared too, except under U-Boot's tree, where the running
+# one is the FIT's.
 PIVOT_HELPER=/usr/bin/boot-pivot
 PIVOT_REQ=/flipper-pivot
 
 KREL=$(val version)
-# Older entries carry no version line; the kernel path holds it either way.
+# Older entries carry no version line; the kernel path holds it.
 [ -n "$KREL" ] || KREL=$(printf '%s' "$K_REL" | sed -n 's:.*/modules/\([^/]*\)/.*:\1:p')
 RUNNING=$(uname -r)
 
-# The board dtb this entry names: its own single 'devicetree' where it has one, else the file
-# for the running board's first compatible inside its devicetreedir, e.g.
-# "flipper,one-rev-f0b0c1" -> rockchip/rk3576-flipper-one-rev-f0b0c1.dtb.
+# The entry's own devicetree, else the running board's dtb inside its devicetreedir.
 base_dtb() {
     if [ -n "$DT_REL" ]; then printf '%s' "$TOP$DT_REL"; return 0; fi
     _comp=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
     printf '%s' "$TOP$DTDIR_REL/rockchip/rk3576-$(printf '%s' "$_comp" | tr ',' '-').dtb"
 }
 
-# Which handover this machine can do, or nothing at all.
+# Which handover this machine can do, or nothing.
 pivot_how() {
     if [ ! -d /run/systemd/system ]; then
         [ -x "$PIVOT_HELPER" ] && command -v switch_root >/dev/null 2>&1 && printf 'switch_root'
@@ -247,8 +179,7 @@ pivot_how() {
     return 0
 }
 
-# Where the profile's init is, relative to its root. Empty when it has none, which is a root
-# that cannot be pivoted into whatever else is true of it.
+# The profile's init, relative to its root.
 pivot_init() {
     for _i in /sbin/init /usr/lib/systemd/systemd /lib/systemd/systemd; do
         [ -x "$TOP/$arg$_i" ] && { printf '%s' "$_i"; return 0; }
@@ -256,8 +187,7 @@ pivot_init() {
     return 1
 }
 
-# The profile's own modules for the running kernel. A version string that matches is not the
-# same as a root that can load a module, and this is the half that actually breaks.
+# The profile's modules for the running kernel: a matching version is not a loadable module.
 pivot_modules() {
     for _d in "$TOP/$arg/usr/lib/modules/$RUNNING" "$TOP/$arg/lib/modules/$RUNNING"; do
         [ -f "$_d/modules.dep" ] && { printf '%s' "$_d"; return 0; }
@@ -265,18 +195,14 @@ pivot_modules() {
     return 1
 }
 
-# A command line reduced to what a pivot cannot change, sorted so two can be compared. root=
-# and rootflags= name the root a pivot puts in place itself, and bootmenu= belongs to the menu
-# image rather than to any profile.
+# A command line without what a pivot sets itself (the root) or what belongs to the
+# menu image, sorted for comparing.
 norm_args() {
     printf '%s\n' "$1" | tr ' \t' '\n\n' | grep -v '^$' \
         | grep -vE '^(root|rootflags|bootmenu|flipper\.entry)=' | sort | tr '\n' ' '
 }
 
-# How the profile's command line differs from the one this boot got, or nothing when they
-# agree. Both directions matter and neither can be fixed by a pivot: an argument the profile
-# asks for it would not get, and one this boot has that the profile never asked for and would
-# be stuck with.
+# How the entry's command line differs from the running one, in either direction.
 cmdline_diff() {
     _want=$(norm_args "$OPTS")
     _have=$(norm_args "$(cat /proc/cmdline 2>/dev/null)")
@@ -291,34 +217,27 @@ cmdline_diff() {
         "$_extra" "$([ "$(echo $_extra | wc -w)" = 1 ] && echo it || echo them)"
 }
 
-# A device tree without the parts the loader writes per boot, so two can be compared. /memory
-# and /chosen are filled in from what the SoC reports and what the loader was told, and the
-# memreserve directives describe this boot's initrd. None of them say which device tree this is.
+# A device tree source without what the loader writes per boot: /memory, /chosen,
+# /reserved-memory, the reserve map, and the blank lines removing them leaves behind.
 strip_loader_nodes() {
     awk '
         /^\/memreserve\// { next }
         /^\t(memory(@[0-9a-fA-F]+)?|chosen|reserved-memory) \{$/ { skip = 1 }
         skip { if ($0 == "\t};") skip = 0; next }
-        # Blank lines go too. dtc separates nodes with one, so removing a node above leaves
-        # its blank behind and the two device trees differ by whitespace alone, which is what
-        # refused every pivot from the boot menu until it was found: one newline.
         /^[[:space:]]*$/ { next }
         { print }
     ' "$1"
 }
 
-# Whether the live device tree is the one this file describes. Compared as source rather than bytes,
-# because the loader edits nodes in place and a byte compare would only ever say no.
-live_tree_is() {  # $1 = dtb file
+# Whether the live device tree is the one in $1, compared as source: the loader edits
+# nodes in place, so bytes never match. Scratch files go beside $1, whose owner removes
+# them; this runs in a subshell, where TOP_TMPFILES would be lost.
+live_tree_is() {
     command -v dtc >/dev/null 2>&1 \
         || { printf 'no dtc to compare the live device tree with'; return 1; }
     [ -r /sys/firmware/fdt ] || { printf 'no /sys/firmware/fdt to compare against'; return 1; }
-    # Beside the dtb rather than mktemp of their own: this runs inside a command substitution,
-    # where an addition to TOP_TMPFILES is lost with the subshell, so whoever owns $1 owns these.
     _lv="$1.lv.dts"; _pf="$1.pf.dts"
-    # The two sides are independent and this board has eight cores, so decompile and strip both
-    # at once: the compare then costs one side rather than two, and it is on the path of every
-    # boot the menu decides.
+    # Both sides at once: the compare then costs one decompile, on every menu boot.
     { dtc -I dtb -O dts -o "$_lv" /sys/firmware/fdt 2>/dev/null \
         && strip_loader_nodes "$_lv" > "$_lv.s"; } & _lvp=$!
     { dtc -I dtb -O dts -o "$_pf" "$1" 2>/dev/null \
@@ -328,9 +247,7 @@ live_tree_is() {  # $1 = dtb file
     [ "$_lvr" = 0 ] || { printf 'the live device tree will not decompile'; return 1; }
     [ "$_pfr" = 0 ] || { printf 'the device tree %s names will not decompile' "$arg"; return 1; }
     if ! cmp -s "$_lv.s" "$_pf.s"; then
-        # Say what differs, not just that something does. Without this the refusal is
-        # unactionable: the device tree is 10,000 lines and the difference has twice turned
-        # out to be something trivial.
+        # Say what differs: the tree is 10,000 lines and the difference has been trivial before.
         say "device tree differs, live has: $(diff "$_pf.s" "$_lv.s" | grep '^[+>]' \
             | grep -v '^+++' \
             | head -3 | tr '\n' '|' | cut -c1-120)"
@@ -343,15 +260,10 @@ live_tree_is() {  # $1 = dtb file
     return 0
 }
 
-# Whether the live device tree and this file describe the same board, which is as much as can
-# be asked out of the boot menu. What Falcon hands that image is U-Boot's control device tree:
-# built from U-Boot's own copy of the board source, carrying its nodes (binman, bootstd, dmc)
-# and no overlay. Comparing it as source says no to every profile, and cannot even be
-# attempted, since dtc refuses that blob outright: a binman template names a node @atf-SEQ,
-# which is not a legal name. Comparing what the two claim to be is cheap, needs no dtc, and is
-# the check that catches the failure worth catching -- the wrong board, or a card whose dtb
-# belongs to another machine.
-same_board() {  # $1 = dtb file
+# Whether the live device tree and $1 describe the same board, by compatible and model.
+# As much as U-Boot's tree allows: it has some 60 nodes of its own and lacks eDP, so as
+# source it matches no profile.
+same_board() {
     command -v fdtget >/dev/null 2>&1 \
         || { printf 'no fdtget to identify the live device tree with'; return 1; }
     _lc=$(fdtget -ts /sys/firmware/fdt / compatible 2>/dev/null | tr '\n' ' ')
@@ -366,17 +278,12 @@ same_board() {  # $1 = dtb file
     return 0
 }
 
-# The device tree an entry asks for: the board base dtb plus every overlay it names. Says
-# nothing and grafts nothing, so the answer is the same whether it is about to be compared with
-# the live tree or handed to kexec. The reason goes to stdout when it cannot be built.
-assemble_tree() {  # $1 = output dtb
+# The entry's device tree into $1: base dtb plus its overlays. The reason on stdout when
+# it cannot be built.
+assemble_tree() {
     _base=$(base_dtb)
     [ -f "$_base" ] || { printf 'base device tree not found: %s' "${_base#$TOP}"; return 1; }
-    # An overlay is applied by resolving the labels it references against the base, so the base
-    # has to carry the symbol table dtc writes with -@. Kernels built without it ship dtbs less
-    # than half the size and no /__symbols__, and every overlay against them fails the same way,
-    # deep inside fdtoverlay. Say it here, where the answer is actionable: the profile needs a
-    # kernel whose dtbs carry symbols.
+    # Overlays resolve labels against the base, which needs the symbol table of dtc -@.
     if [ -n "$OVL_REL" ] && command -v fdtget >/dev/null 2>&1; then
         fdtget -l "$_base" / 2>/dev/null | grep -qx '__symbols__' \
             || { printf '%s has no symbol table (dtc -@); no overlay can apply' "${_base#$TOP}"
@@ -386,24 +293,32 @@ assemble_tree() {  # $1 = output dtb
     _ovl=""
     for _o in $OVL_REL; do _ovl="$_ovl $TOP$_o"; done
     [ -n "$_ovl" ] || { cp "$_base" "$1"; return 0; }
-    # fdtoverlay names the file and the reason; without them the failure is unreadable, which is
-    # what sent one card boot looking in the wrong place.
     # shellcheck disable=SC2086
     _err=$(fdtoverlay -i "$_base" -o "$1" $_ovl 2>&1) \
         || { printf 'fdtoverlay failed: %s' "$(printf '%s' "$_err" | tr '\n' ' ')"; return 1; }
     return 0
 }
 
-# Why the profile's device tree is not the running one, or nothing when it is. The two paths
-# know the live device tree differently, so this is where they part.
+# SPL records what it loaded under /fit-images; nothing a profile assembles has that node.
+live_tree_is_uboots() {
+    fdtget -l /sys/firmware/fdt / 2>/dev/null | grep -qx 'fit-images'
+}
+
+# Why U-Boot's tree will not do for this profile, or nothing when it will.
+uboot_tree_reason() {
+    [ -z "$OVL_REL" ] || {
+        printf 'it wants overlays (%s) and the running device tree is the boot menu'"'"'s, with none' \
+            "$(for _o in $OVL_REL; do printf '%s ' "${_o##*/}"; done)"; return 0; }
+    _base=$(base_dtb)
+    [ -f "$_base" ] || { printf 'no base device tree at %s' "${_base#$TOP}"; return 0; }
+    _why=$(same_board "$_base") || printf '%s (%s)' "$_why" "${_base#$TOP}"
+    return 0
+}
+
+# Why the profile's device tree is not the running one, or nothing when it is.
 tree_reason() {
-    if [ "$PIVOT_HOW" = switch_root ]; then
-        [ -z "$OVL_REL" ] || {
-            printf 'it wants overlays (%s) and this image runs a device tree with none' \
-                "$(for _o in $OVL_REL; do printf '%s ' "${_o##*/}"; done)"; return 0; }
-        _base=$(base_dtb)
-        [ -f "$_base" ] || { printf 'no base device tree at %s' "${_base#$TOP}"; return 0; }
-        _why=$(same_board "$_base") || printf '%s (%s)' "$_why" "${_base#$TOP}"
+    if [ "$PIVOT_HOW" = switch_root ] || live_tree_is_uboots; then
+        uboot_tree_reason
         return 0
     fi
     _want=$(mktemp /tmp/boot-profile.XXXXXX.want.dtb)
@@ -413,8 +328,7 @@ tree_reason() {
     return 0
 }
 
-# Why this profile cannot be pivoted into, or nothing at all when it can. One function, so the
-# log can say exactly which rule sent a boot the long way round.
+# Why this profile cannot be pivoted into, or nothing when it can.
 pivot_reason() {
     [ "$no_pivot" = 0 ] || { printf '%s' "--no-pivot"; return 0; }
     [ -n "$PIVOT_HOW" ] || { printf 'nothing here can hand PID 1 over'; return 0; }
@@ -424,28 +338,15 @@ pivot_reason() {
     pivot_modules >/dev/null || { printf 'no modules for %s in %s' "$RUNNING" "$arg"; return 0; }
     pivot_init >/dev/null || { printf 'no init in %s' "$arg"; return 0; }
     _why=$(tree_reason); [ -z "$_why" ] || { printf '%s' "$_why"; return 0; }
-    # Between two profiles, any difference at all, either way: they are booted the same way,
-    # so a difference there is a profile asking for something specific, and pivoting anyway
-    # would leave it running under a command line it never asked for.
-    #
-    # Out of the boot menu the comparison is not made. Falcon boots that image with the
-    # bootargs built into the FIT, which are U-Boot's and not any profile's, so the answer
-    # would always be no and never for a reason about this profile. What is checked instead is
-    # what a wrong answer would actually break: the kernel version, the overlays, and that the
-    # live device tree describes the same board as the dtb the entry names. A profile pivoted
-    # from the menu therefore runs with the menu's kernel parameters, `quiet` and all.
-    [ "$PIVOT_HOW" = switch_root ] || {
+    # Under U-Boot's tree the command line is the FIT's, nobody's profile, so it is not compared.
+    [ "$PIVOT_HOW" = switch_root ] || live_tree_is_uboots || {
         _why=$(cmdline_diff); [ -z "$_why" ] || { printf '%s' "$_why"; return 0; }
     }
     return 0
 }
 
-# An image loaded by --arm, given back before a pivot hands over.
-#
-# A pivot keeps this kernel, and /run with it, so an image left loaded outlives the handover:
-# it would sit in the new userspace holding its memory (measured 303MB) for a profile nobody
-# is booting, with a record describing it that nothing will ever act on. It can only be for
-# another profile, since arming one that would be pivoted into loads nothing at all.
+# A pivot keeps this kernel, so an image --arm left loaded (303MB) would outlive the
+# handover for a profile nobody is booting.
 drop_armed_image() {
     [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ] || { rm -f "$ARMED"; return 0; }
     rm -f "$ARMED"
@@ -453,15 +354,8 @@ drop_armed_image() {
     say "discarded the image armed for another profile: a pivot needs none"
 }
 
-# Count this attempt against the entry, at the point of no return and not before: a boot that
-# never happened must not spend a try, so this is called after everything that can still fail.
-#
-# The spec's counter, in the entry's own file name: tries left down, tries done up, and at zero the
-# entry is 'bad' and sorts last, which is what hands the device back to the kernel that did boot.
-# An entry with no counter has been blessed by a good boot already and is left alone.
-#
-# Best effort, loudly: a boot must not be refused because a file could not be renamed, but a
-# counter that silently stops counting is a fallback that silently stops working.
+# Spend one try of the entry's counter, at the point of no return. A rename that fails
+# must not refuse the boot, but it is said.
 count_attempt() {
     name_the_boot
     _was="$(entry_counter_of "$entry")"
@@ -472,14 +366,8 @@ count_attempt() {
     return 0
 }
 
-# Where a pivot leaves the entry's id for the system it hands over to.
-#
-# An entry names itself on its command line, and that is how flipper-bless-boot knows what to bless
-# -- but a pivot does not boot a kernel, so the command line the new root comes up with is the one
-# already running, and for a pivot from the boot menu that is the menu's own. Without this a
-# pivoted boot could never be blessed: it would spend a try each time and take a working entry to
-# 'bad' in three. /run survives both handovers (switch_root moves it across, soft-reboot keeps it)
-# and is gone by the next real boot, which is exactly the lifetime this fact has.
+# The entry's id for flipper-bless-boot: a pivot boots no kernel, so the command line
+# cannot say. /run survives both handovers and no real boot.
 BOOT_ENTRY_NOTE=/run/flipper-boot-entry
 
 name_the_boot() {
@@ -488,29 +376,25 @@ name_the_boot() {
     return 0
 }
 
-# Mount nothing, load nothing: write down what init needs and ask it to take over.
+# Write down what init needs and ask it to take over.
 pivot_switch_root() {
     drop_armed_image
     _init=$(pivot_init)
     say "pivot into $arg by switch_root: kernel $RUNNING and its device tree are live, init $_init"
     count_attempt
-    # In the initramfs root, not /run: the shutdown pass init runs before boot-pivot unmounts
-    # /run, and rootfs is the one thing that survives it.
+    # In the initramfs root: /run is unmounted by init's shutdown pass before boot-pivot runs.
     printf 'DEV=%s\nSUBVOL=%s\nINIT=%s\n' "$ROOTDEV" "$arg" "$_init" > "$PIVOT_REQ" \
         || die "cannot write $PIVOT_REQ"
-    # Ours goes now, while there is still something to unmount it with. boot-pivot mounts the
-    # profile's root for itself and needs nothing of ours.
     top_cleanup
     trap - EXIT INT TERM HUP
     sync
     say "asking init to hand over: SIGQUIT, then boot-pivot as PID 1"
     kill -QUIT 1 || die "cannot signal init"
-    # Init is on its way to killing us. Wait for it rather than exiting: an exit status here
-    # would tell the menu the boot is over and put a screen back up over the handover.
+    # Exiting would tell the menu the boot is over and put a screen back over the handover.
     while : ; do sleep 1; done
 }
 
-# The profile goes at /run/nextroot and systemd does the rest.
+# The profile at /run/nextroot, and systemd does the rest.
 pivot_soft_reboot() {
     drop_armed_image
     say "pivot into $arg with soft-reboot: kernel $RUNNING and its device tree stay up"
@@ -518,14 +402,12 @@ pivot_soft_reboot() {
     mkdir -p /run/nextroot
     _err=$(mount -t btrfs -o "rw,subvol=$arg" "$ROOTDEV" /run/nextroot 2>&1) \
         || die "cannot mount $arg at /run/nextroot: $_err"
-    # systemd tests this itself and quietly falls back to a full reboot when it fails, which
-    # looks exactly like a pivot that was never tried. Say it here instead.
+    # systemd would quietly fall back to a full reboot without this.
     [ -r /run/nextroot/etc/os-release ] || [ -r /run/nextroot/usr/lib/os-release ] || {
         umount /run/nextroot 2>/dev/null || true
         die "$arg carries no os-release, so systemd would not take it as a root"
     }
-    # Ours must not survive into the new root: soft-reboot keeps /run, so a top-level mount
-    # left here comes up inside the profile we are switching to.
+    # soft-reboot keeps /run, so our top-level mount must not be left there.
     top_cleanup
     trap - EXIT INT TERM HUP
     sync
@@ -536,23 +418,15 @@ pivot_soft_reboot() {
 PIVOT_HOW=$(pivot_how)
 PIVOT_WHY=$(pivot_reason)
 if [ -z "$PIVOT_WHY" ]; then
-    # A dry run validates the path it just chose, and a pivot needs nothing loaded and no
-    # device tree assembled: everything it depends on -- the kernel version, the profile's modules,
-    # its init, the live device tree -- has been read already to get here. Going on to assemble a
-    # device tree and load a kexec image would be proving the wrong path, at the cost of a
-    # dtc round trip and a memory graft for a boot that would never use either.
+    # A pivot loads nothing and everything it depends on has been read to get here.
     if [ "$dry" = 1 ]; then
         say "dry run: $arg would be pivoted into with $PIVOT_HOW; nothing loaded, nothing changed"
         say "dry run: add --no-pivot to prove the kexec path on this machine"
         exit 0
     fi
-    # Arming is preparation for a boot, never a boot: a pivot has nothing to prepare, so say so
-    # and stop. Without this the menu would boot the profile the moment it armed it.
+    # Arming is preparation, never a boot: a pivot has nothing to prepare.
     if [ "$arm" = 1 ]; then
         rm -f "$ARMED"
-        # An image left over from arming something else has to go with the record. A pivot keeps
-        # this kernel running, so it would otherwise sit there holding its memory for the rest of
-        # the machine's life, armed for a profile nobody asked for.
         if [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ]; then
             kexec_wait kexec --kexec-syscall -u || true
             say "discarded the image armed earlier: $arg needs none"
@@ -568,111 +442,50 @@ else
     say "kexec into $arg rather than pivot: $PIVOT_WHY"
 fi
 
-# Graft this machine's /memory node onto an assembled device tree.
+# Copy this machine's /memory node onto the assembled device tree with libfdt (0.03s).
 #
-# A shipped dtb describes the board, not the board's RAM: U-Boot writes /memory at every
-# cold boot from what the SoC reports, and a BLS entry cannot carry it. Without it a
-# kernel has no memory at all and dies before it can initialise a console, which is a
-# boot that hangs and says nothing. That node is also what keeps firmware safe: it starts
-# at 0x40200000 while ATF loads below that, so the window handed to Linux excludes it.
-#
-# The live reserve map is deliberately NOT copied. It describes the boot that is running:
-# measured on this board it is exactly the length of the initramfs U-Boot loaded, so it is
-# a fact about that boot's initrd and not about the machine. kexec tells the new kernel
-# where its own initrd is.
-#
-# Grafted rather than taking the live device tree whole, because a device tree belongs to its
-# kernel: every entry names the devicetreedir installed beside the kernel it boots, and the live
-# device tree is whatever kernel is running now. RAM is a fact about the machine and survives
-# that difference.
-#
-# Best-effort, but never silent: a failure warns and the boot goes on, since a device tree with a
-# memory node of its own is fine without us. Saying nothing is what let a broken splice sit
-# in this function through several hangs, each looking exactly like the bug it fixes.
-graft_warn() { say "$*, booting without this machine's memory node"; }
-
-# The fast way: copy the live /memory node into the assembled device tree with libfdt, no text round
-# trip. Measured on this board, 0.022s against 0.63s for decompile-splice-recompile, on a boot
-# path where that was a fifth of everything before the jump.
-#
-# Copied, never constructed: the node's name is whatever the loader wrote (plain `memory` here,
-# not `memory@40200000`) and its reg cells describe this machine's banks, so both are read from
-# the live device tree and written back verbatim. Returns non-zero if any step fails, and the caller
-# falls back to the dts splice below, which is slower but has booted this board for months.
-graft_with_fdtput() {  # $1 = assembled dtb, edited in place
-    command -v fdtput >/dev/null 2>&1 && command -v fdtget >/dev/null 2>&1 || return 1
-    _node=$(fdtget -l /sys/firmware/fdt / 2>/dev/null | grep -m1 '^memory') || return 1
-    [ -n "$_node" ] || return 1
-    _reg=$(fdtget -t x /sys/firmware/fdt "/$_node" reg 2>/dev/null) || return 1
-    [ -n "$_reg" ] || return 1
-    _dt=$(fdtget -ts /sys/firmware/fdt "/$_node" device_type 2>/dev/null) || _dt=memory
-    fdtput -c "$1" "/$_node" 2>/dev/null || return 1
-    fdtput -ts "$1" "/$_node" device_type "$_dt" 2>/dev/null || return 1
-    # shellcheck disable=SC2086
-    fdtput -t x "$1" "/$_node" reg $_reg 2>/dev/null || return 1
-    # Read it back rather than trust the writes: libfdt edits the blob in place, so unlike the
-    # dts path there is no compile to catch a device tree this has broken.
-    [ "$(fdtget -t x "$1" "/$_node" reg 2>/dev/null)" = "$_reg" ] || return 1
-    return 0
-}
-graft_firmware_memory() {  # $1 = assembled dtb, edited in place
+# A shipped dtb describes the board, not its RAM: U-Boot writes /memory at every cold
+# boot, and without it a kernel dies before it has a console. The node is copied, not
+# constructed, so the name and the banks stay firmware's. The reserve map is not copied:
+# it describes the running boot's initrd. A failure is a die, because the kernel this
+# would load hangs and says nothing.
+graft_firmware_memory() {
     [ -r /sys/firmware/fdt ] || return 0
-    # A device tree that names its own memory needs nothing from us.
     ! fdtget -l "$1" / 2>/dev/null | grep -qE '^memory(@|$)' || return 0
-    if graft_with_fdtput "$1"; then
-        say "grafted this machine's memory node onto the profile's device tree"
-        return 0
-    fi
-    say "fdtput could not graft the memory node, falling back to a dts round trip"
-    command -v dtc >/dev/null 2>&1 || { graft_warn "no dtc"; return 0; }
-
-    _live_dts=$(mktemp /tmp/boot-profile.XXXXXX.live.dts)
-    _asm_dts=$(mktemp /tmp/boot-profile.XXXXXX.asm.dts)
-    _new_dts=$(mktemp /tmp/boot-profile.XXXXXX.new.dts)
-    _new_dtb=$(mktemp /tmp/boot-profile.XXXXXX.new.dtb)
-    TOP_TMPFILES="${TOP_TMPFILES:-} $_live_dts $_asm_dts $_new_dts $_new_dtb"
-    dtc -I dtb -O dts -o "$_live_dts" /sys/firmware/fdt 2>/dev/null \
-        || { graft_warn "the live device tree will not decompile"; return 0; }
-    dtc -I dtb -O dts -o "$_asm_dts" "$1" 2>/dev/null \
-        || { graft_warn "the profile's device tree will not decompile"; return 0; }
-
-    _mem=$(awk '/^\tmemory(@[0-9a-fA-F]+)? \{$/,/^\t\};$/' "$_live_dts")
-    [ -n "$_mem" ] || { graft_warn "the live device tree has no memory node"; return 0; }
-
-    # As the root's LAST child: dtc has already written the root's properties, and a
-    # property may not follow a node.
-    awk -v mem="$_mem" '
-        { line[NR] = $0; if ($0 == "};") last = NR }
-        END {
-            for (i = 1; i <= NR; i++) {
-                if (i == last) print mem
-                print line[i]
-            }
-        }
-    ' "$_asm_dts" > "$_new_dts" || { graft_warn "the splice failed"; return 0; }
-    dtc -I dts -O dtb -o "$_new_dtb" "$_new_dts" 2>/dev/null \
-        || { graft_warn "the grafted device tree will not compile"; return 0; }
-    cat "$_new_dtb" > "$1"
+    command -v fdtput >/dev/null 2>&1 && command -v fdtget >/dev/null 2>&1 \
+        || die "no fdtput to graft this machine's memory node with"
+    # reg is copied as raw cells, so the two trees have to agree on what a cell means.
+    for _c in '#address-cells' '#size-cells'; do
+        [ "$(fdtget -t u /sys/firmware/fdt / "$_c" 2>/dev/null)" = "$(fdtget -t u "$1" / "$_c" 2>/dev/null)" ] \
+            || die "the live and the assembled device tree disagree on $_c; no memory node can be copied"
+    done
+    _node=$(fdtget -l /sys/firmware/fdt / 2>/dev/null | grep -m1 '^memory') && [ -n "$_node" ] \
+        || die "the live device tree has no memory node to copy"
+    _reg=$(fdtget -t x /sys/firmware/fdt "/$_node" reg 2>/dev/null) && [ -n "$_reg" ] \
+        || die "the live memory node has no reg"
+    _dt=$(fdtget -ts /sys/firmware/fdt "/$_node" device_type 2>/dev/null) || _dt=memory
+    # shellcheck disable=SC2086
+    fdtput -c "$1" "/$_node" 2>/dev/null \
+        && fdtput -ts "$1" "/$_node" device_type "$_dt" 2>/dev/null \
+        && fdtput -t x "$1" "/$_node" reg $_reg 2>/dev/null \
+        || die "fdtput could not write the memory node into the assembled device tree"
+    # libfdt edits in place with no compile to catch a broken tree, so read it back.
+    [ "$(fdtget -t x "$1" "/$_node" reg 2>/dev/null)" = "$_reg" ] \
+        || die "the memory node written into the assembled device tree does not read back"
     say "grafted this machine's memory node onto the profile's device tree"
 }
 
-# Only the kexec path needs these, and only now that pivot has been ruled out. Checked up
-# front they refused a handover that never touches them: a profile installed from stock
-# carries no kexec-tools, and on one of those the whole tool used to exit before it had
-# looked at whether it could pivot instead.
+# Only the kexec path needs these: a stock profile carries no kexec-tools and may still pivot.
 command -v kexec      >/dev/null 2>&1 || die "kexec not installed (kexec-tools), and $arg cannot be pivoted into: $PIVOT_WHY"
 command -v fdtoverlay >/dev/null 2>&1 || die "fdtoverlay not installed"
 
-# Whether the image already in the kernel is the one this boot wants. --arm leaves a record of
-# what it loaded; everything that would change the image is compared against it, and the flag
-# is read too, since an image can be discarded without the record going with it.
-armed_for() {  # $1 = profile
+# Whether the image in the kernel is the one this boot wants, by --arm's record.
+armed_for() {
     [ -r "$ARMED" ] || return 1
     [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ] || return 1
     A_PROFILE=; A_DEV=; A_ENTRY=; A_KREL=; A_OPTS=; A_KERNEL=; A_INITRD=
     . "$ARMED"
-    # Paths go in without the mount point they were read through: every run mounts the top
-    # level somewhere new, so the recorded path would never match the next one.
+    # Paths without the mount point: every run mounts the top level somewhere new.
     [ "$A_PROFILE" = "$1" ] && [ "$A_DEV" = "$ROOTDEV" ] && [ "$A_ENTRY" = "${entry#$TOP}" ] \
         && [ "$A_KREL" = "$KREL" ] && [ "$A_OPTS" = "$OPTS" ] \
         && [ "$A_KERNEL" = "$K_REL" ] && [ "$A_INITRD" = "$I_REL" ]
@@ -688,26 +501,14 @@ if armed_for "$arg"; then
     say "kexec into $arg with the image --arm already loaded, nothing to assemble or load"
 else
     DTB=$(mktemp /tmp/boot-profile.XXXXXX.dtb); TOP_TMPFILES="${TOP_TMPFILES:-} $DTB"
-    # Assembled from the entry, never copied from /sys/firmware/fdt, not even for the profile
-    # that is running: the live tree carries whatever the last boot applied, so a profile whose
-    # overlays have changed since it booted would boot again with the old ones. That is the
-    # whole point of taking the kexec path here.
+    # Assembled from the entry, never copied from the live tree, which carries what the
+    # last boot applied.
     _why=$(assemble_tree "$DTB") || die "$_why"
     graft_firmware_memory "$DTB"
 
-    # --kexec-syscall, or the device tree assembled above is thrown away. kexec-tools defaults to
-    # kexec_file_load, and on that path arm64 discards a user-supplied dtb on purpose --
-    # `if (do_kexec_file_syscall) arm64_opts.dtb = NULL;` -- because the kernel builds the new
-    # device tree from the running one. The old syscall runs the arm64 purgatory, which loads our
-    # dtb as
-    # a segment and enters the kernel with its address in x0.
-    #
-    # --no-checks with it, because that purgatory otherwise SHA-256s every segment before it
-    # branches: measured on this board, 12 of the 13.5 seconds between "Starting new kernel" and
-    # the new kernel's first console line, for 42MB of kernel and initrd. The digest is worth
-    # paying for a crash kernel loaded hours in advance; here the same tool wrote those segments
-    # milliseconds ago on a machine that is about to jump into them, with no firmware handoff and
-    # nothing else running in between.
+    # --kexec-syscall: kexec_file_load discards a user dtb on arm64. --no-checks: the
+    # purgatory's SHA-256 of the segments was 12 of the 13.5 seconds to the new kernel's
+    # first line, for an image this tool wrote milliseconds ago.
     kexec_wait kexec --kexec-syscall --no-checks -l "$K" ${I_REL:+--initrd="$I"} \
         --dtb="$DTB" --command-line="$OPTS" || die "kexec load failed"
 
@@ -717,8 +518,6 @@ else
             || die "cannot write $ARMED"
         printf "A_KERNEL='%s'\nA_INITRD='%s'\n" "$K_REL" "$I_REL" >> "$ARMED"
         say "armed $arg: its image is loaded and a boot of it now hands over straight away"
-        # The assembled device tree is in the image already, and the mount was only needed to
-        # read it. Both go, or an arm leaves a mount live until something else boots.
         top_cleanup
         trap - EXIT INT TERM HUP
         exit 0
@@ -731,29 +530,21 @@ if [ "$dry" = 1 ]; then
     exit 0
 fi
 
-# `systemctl kexec` is the clean way over: services stop, filesystems are unmounted, and only
-# then does the loaded image run. It needs systemd to ask, which a booted profile has and an
-# initramfs does not.
+# Under systemd, services stop and filesystems unmount before the image runs.
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     say "kexec into $arg, handing over with systemctl kexec"
     count_attempt
     exec systemctl kexec
 fi
 
-# No systemd to ask, so do by hand the little that still matters. The image is already in the
-# kernel, so the assembled dtb and our own mount of the top level have done their job; drop them
-# now, because `kexec -e` never returns and the EXIT trap would never run, leaving a mount for the
-# new kernel to find dirty.
+# kexec -e never returns, so the EXIT trap would not run: drop our mount here.
 say "kexec into $arg, no systemd, jumping straight in"
 count_attempt
 top_cleanup
 trap - EXIT INT TERM HUP
 
-# Anything else of ours still mounted belongs to a tool that has not finished: a size walk
-# takes seconds and the menu can boot while one runs, so its top-level mount is still live
-# with reads in flight. Drop them all, lazily where a reader holds one. The jump is
-# committed by here, and the alternative is what the log shows: the disks go offline under
-# a mounted filesystem and its reads fail on the way out.
+# Other tools' top-level mounts too, lazily where a reader holds one: the disks go
+# offline under a mounted filesystem otherwise.
 for _m in $(awk '$3 == "btrfs" { print $2 }' /proc/self/mounts | sort -r); do
     umount "$_m" 2>/dev/null || umount -l "$_m" 2>/dev/null || true
 done

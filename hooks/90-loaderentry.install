@@ -45,6 +45,9 @@ if [ "$COMMAND" = "remove" ]; then
     # ($BOOT_ROOT/$ENTRY_TOKEN) too. rmdir (not rm -rf) only succeeds if truly empty, so it
     # never touches a token dir that still has another version staged.
     rmdir "$BOOT_ROOT/$ENTRY_TOKEN" 2>/dev/null || :
+    # The entries are gone from the page cache; make that true on the disk as well, or a
+    # power cut brings back entries for a kernel whose modules have been removed.
+    sync
     exit 0
 fi
 [ "$COMMAND" = "add" ] || exit 0
@@ -111,4 +114,8 @@ if [ "$matched" != 1 ]; then
     emit_entry "$(printf '%s' "$CUR_SUBVOL" | tr -d '@')" "rootflags=subvol=$CUR_SUBVOL" "" "" "$ovl"
 fi
 
+# One commit for the install, however many entries it wrote: the kernel, its initrd and its
+# device trees are already on the disk, and an entry lost to a power cut leaves a kernel
+# installed that nothing boots.
+sync
 exit 0

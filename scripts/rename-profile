@@ -86,4 +86,8 @@ if [ "$_was_auto" = 0 ] && [ -r /usr/lib/flipper-blsname.sh ]; then
     done
 fi
 
+# One commit for all of it: the old name's entries went, the new one's was written, and its
+# sort-key may have been restamped after that. Until this, none of it is on the disk.
+sync
+
 echo "Reboot and pick '$new' from the boot menu to use it"

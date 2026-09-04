@@ -68,3 +68,6 @@ echo "Deleted '$rel'"
 
 # drop this profile's BLS entries + /boot/<token>/ staging
 with_bls "entries/staging not fully removed for $rel" remove_root_entries "$rel"
+# The subvolume has gone; commit its entries going too, so a power cut cannot leave entries
+# naming a root that is no longer there.
+sync

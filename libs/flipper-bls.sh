@@ -137,7 +137,8 @@ remove_entries() {  # $1 = subvol  $2 = version
     for _c in "${ENTRIES:-/boot/loader/entries}"/*.conf; do
         [ -f "$_c" ] || continue
         [ "$(awk '$1=="version"{print $2; exit}' "$_c")" = "$2" ] || continue
-        [ "$(entry_subvol_of "$_c")" = "$1" ] && rm -f "$_c" || true
+        [ "$(entry_subvol_of "$_c")" = "$1" ] || continue
+        rm -f "$_c"
     done
     return 0   # a non-matching last entry must not fail the loop under set -e
 }
@@ -561,4 +562,8 @@ flipper_rewrite_overlay() {
         _n=$((_n + 1)); echo "flipper-bls: updated ${_f##*/}"
     done
     [ "$_n" -gt 0 ] || { echo "flipper-bls: no matching entries for $_sv" >&2; return 1; }
+    # The device tree these entries boot with has changed, which is a change to what the
+    # next boot does; btrfs would otherwise hold it in memory for up to `commit=` seconds,
+    # and somebody who adds an overlay and pulls the power gets the old one back.
+    sync
 }

@@ -207,6 +207,10 @@ fi
 # BLS entry + /etc/kernel/entry-token. Pass the SOURCE as origin hint so the root lands in that
 # profile's band if parent_uuid is left dangling.
 with_bls "boot entry not created for $rel" flipper_write_entry "$rel" "$tgt" "$src_rel"
+# The profile exists and its entry is the only thing that makes it bootable; on btrfs that
+# entry sits in memory until the next transaction, so commit it before anything else can
+# interrupt. One commit for the whole write, which removed the old entry and wrote this one.
+sync
 
 if [ "$move" = 1 ]; then verb="moved"; else verb="created"; fi
 

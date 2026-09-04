@@ -190,3 +190,8 @@ case "$_action" in
         echo "set-boot-order: $_have_auto boots when nobody presses anything"
         ;;
 esac
+
+# What boots is these files and nothing else, so a choice that is only in the page cache is
+# a choice the next boot may not have made. btrfs commits metadata on its own schedule, and
+# somebody who picks a profile and pulls the power is the case this exists for.
+[ "$_action" = list ] || sync

@@ -61,5 +61,13 @@ for f in $(entry_files_for "$id"); do
     echo "flipper-bless-boot: $id booted cleanly, counter $counter removed"
     blessed=1
 done
+if [ "$blessed" = 1 ]; then
+    # A rename is metadata, and on btrfs metadata reaches the disk with the next
+    # transaction commit, up to `commit=` seconds later. Lose that and the counter comes
+    # back on a machine that just proved it boots, so the next boots spend tries again
+    # and three of them make the entry bad. boot-profile syncs before every handover for
+    # the same reason; this is the other half of the counter's life.
+    sync
+fi
 [ "$blessed" = 1 ] || echo "flipper-bless-boot: $id carries no counter, already good"
 exit 0

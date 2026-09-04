@@ -10,7 +10,8 @@ KERNEL_VERSION="${2:?}"
 UM="/usr/lib/modules/$KERNEL_VERSION"
 
 if [ "$1" = remove ]; then
-    rm -f "$UM/initrd"          # untracked by dpkg
+    # Untracked by dpkg
+    rm -f "$UM/initrd"
     exit 0
 fi
 [ "$1" = add ] || exit 0

@@ -277,7 +277,8 @@ comm -23 "$WORK/deleted.all" "$WORK/changed" > "$WORK/deleted"
 btrfs subvolume delete "$SRCSNAP" >/dev/null 2>&1 || true; SRCSNAP=""
 
 # --- packages the user added/removed vs the ancestor (intent, replayed with apt) ---
-manual_set() {  # $1 = subvol rel -> sorted list of manually-installed packages
+# $1 = subvol rel -> sorted list of manually-installed packages
+manual_set() {
     _st="$TOP/$1/var/lib/dpkg/status"; _ex="$TOP/$1/var/lib/apt/extended_states"
     [ -f "$_st" ] || return 0
     awk 'BEGIN{RS="";FS="\n"} { p=""; ok=0;
@@ -335,7 +336,8 @@ removed_pkgs=$(comm -23 "$WORK/pkg.base" "$WORK/pkg.src" | tr '\n' ' ')
 is_text() { grep -Iq . "$1" 2>/dev/null; }
 
 # Apply src's mode/owner to dst only where the user changed them vs base (a 3-way for metadata).
-sync_meta() {  # $1 src $2 dst $3 base
+# $1 src $2 dst $3 base
+sync_meta() {
     _sm=$(stat -c '%a' "$1" 2>/dev/null || echo); _bm=""
     { [ -n "${3:-}" ] && [ -e "$3" ]; } && _bm=$(stat -c '%a' "$3" 2>/dev/null || echo)
     [ -n "$_sm" ] && [ "$_sm" != "$_bm" ] && chmod "$_sm" "$2" 2>/dev/null || true
@@ -359,7 +361,8 @@ mergiraf_lang() {
 
 
 
-merge_accountdb() {  # $1 = etc/<db>: per-entry 3-way merge into dst (deterministic, no sidecar)
+# $1 = etc/<db>: per-entry 3-way merge into dst (deterministic, no sidecar)
+merge_accountdb() {
     _f=$1; _S="$TOP/$src/$_f"; _O="$TOP/$dst/$_f"; _B="$TOP/$base_rel/$_f"
     _mb="$EMPTY"; [ -f "$_B" ] && _mb="$_B"
     # _lf: fields holding comma-separated member lists, set-merged instead of taken whole.
@@ -371,7 +374,8 @@ merge_accountdb() {  # $1 = etc/<db>: per-entry 3-way merge into dst (determinis
         *)                _lf="";  _nf=7 ;;
     esac
     if [ ! -f "$_O" ]; then
-        rsync -aHAX "$_S" "$_O"          # dst lacks the db -> take the user's copy verbatim
+        # Dst lacks the db -> take the user's copy verbatim
+        rsync -aHAX "$_S" "$_O"
         echo x >> "$WORK/merged"
         return 0
     fi
@@ -433,7 +437,8 @@ finalize_accountdbs() {
 
 # Report accounts present in a database but missing from its shadow companion, either way round.
 # Names only: the entries themselves are merged per file above, this checks the sets line up.
-check_db_pair() {  # $1 = passwd/group, $2 = its shadow/gshadow companion
+# $1 = passwd/group, $2 = its shadow/gshadow companion
+check_db_pair() {
     [ -f "$TOP/$dst/$1" ] && [ -f "$TOP/$dst/$2" ] || return 0
     cut -d: -f1 "$TOP/$dst/$1" | sort -u > "$WORK/k1"
     cut -d: -f1 "$TOP/$dst/$2" | sort -u > "$WORK/k2"
@@ -458,9 +463,11 @@ merge_one() {
     if [ -d "$_S" ] && [ ! -L "$_S" ]; then mkdir -p "$_O"; sync_meta "$_S" "$_O" "$_B"; echo x >> "$WORK/merged"; return 0; fi
     if [ -L "$_S" ] || [ ! -f "$_S" ]; then rsync -aHAX "$_S" "$_O"; echo x >> "$WORK/merged"; return 0; fi
     if [ ! -e "$_O" ] || { [ -f "$_B" ] && cmp -s "$_B" "$_O"; }; then
-        rsync -aHAX "$_S" "$_O"; echo x >> "$WORK/merged"; return 0     # dst untouched -> take user's (meta preserved)
+        # Dst untouched -> take user's (meta preserved)
+        rsync -aHAX "$_S" "$_O"; echo x >> "$WORK/merged"; return 0
     fi
-    if cmp -s "$_S" "$_O"; then sync_meta "$_S" "$_O" "$_B"; return 0; fi   # same content -> maybe a mode-only change
+    # Same content -> maybe a mode-only change
+    if cmp -s "$_S" "$_O"; then sync_meta "$_S" "$_O" "$_B"; return 0; fi
     _mb="$EMPTY"; [ -f "$_B" ] && _mb="$_B"
     if is_text "$_S" && is_text "$_O"; then
         set +e
@@ -635,7 +642,8 @@ if [ -n "$added_pkgs" ] || { [ "$purge_removed" = 1 ] && [ -n "$removed_pkgs" ];
         fi
     fi
     [ "$purge_removed" = 1 ] && [ -n "$removed_pkgs" ] && { echo "  purging removed:$removed_pkgs"; chroot "$TOP/$dst" apt-get purge -y $removed_pkgs || true; }
-    rm -f "$_rc"; [ -n "$_rcbak" ] && mv "$_rcbak" "$_rc"   # restore dst's original resolv.conf
+    # Restore dst's original resolv.conf
+    rm -f "$_rc"; [ -n "$_rcbak" ] && mv "$_rcbak" "$_rc"
     for _m in dev/pts dev sys proc; do umount "$TOP/$dst/$_m" 2>/dev/null || true; done
 fi
 

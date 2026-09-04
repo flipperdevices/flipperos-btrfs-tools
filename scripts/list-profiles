@@ -54,7 +54,8 @@ echo
 # Newest of systemd's random-seed (written at every boot and clean shutdown) and timesyncd's clock
 # (written while the profile runs). Both are inherited from whatever the profile was made from, so
 # only a stamp newer than the profile's own creation counts; anything older reads 'never'.
-last_used() {  # $1 = fs path  $2 = creation epoch -> "YYYY-MM-DD HH:MM:SS" | never
+# $1 = fs path  $2 = creation epoch -> "YYYY-MM-DD HH:MM:SS" | never
+last_used() {
     _lu=""
     for _w in var/lib/systemd/random-seed var/lib/systemd/timesync/clock; do
         [ -f "$1/$_w" ] || continue
@@ -71,7 +72,8 @@ last_used() {  # $1 = fs path  $2 = creation epoch -> "YYYY-MM-DD HH:MM:SS" | ne
     esac
 }
 
-emit() {  # $1=display name  $2=fs path
+# $1=display name  $2=fs path
+emit() {
     info=$(btrfs subvolume show "$2" 2>/dev/null) || return 0
     id=$(get "$info" "Subvolume ID")
     otime=$(get "$info" "Creation time")
@@ -99,7 +101,8 @@ emit() {  # $1=display name  $2=fs path
     # convert while the "+0000" btrfs prints is still there: date -d without a zone assumes the
     # reader's, which shifts the epoch whenever that differs from the zone the profile was made in
     oepoch=$(date -d "$otime" +%s 2>/dev/null || echo "")
-    otime=${otime% +*}   # the column shows the time without the zone
+    # The column shows the time without the zone
+    otime=${otime% +*}
     # the profile we are running from writes its state at boot and then only now and then, so a
     # timestamp here would read as stale for the one profile that is definitely in use
     if [ -n "$mark" ]; then lu=now; else lu=$(last_used "$2" "$oepoch"); fi
@@ -109,8 +112,8 @@ emit() {  # $1=display name  $2=fs path
 printf 'NAME\t\tKIND\tID\tCREATED\tLAST USED\tRO\tPARENT\tORIGIN\n' > "$rows"
 # top-level profile roots + @_old_* leftovers; skip shared/reserved subvols (@snapshots,
 # @stock-snapshots, ...) so stocks (now nested under @stock-snapshots) are not listed here
-# One job per profile, because each one costs a handful of processes -- two `btrfs
-# subvolume show`s, a sed, a date, two stats -- and they share nothing but the mount and
+# One job per profile, because each one costs a handful of processes (two `btrfs
+# subvolume show`s, a sed, a date, two stats) and they share nothing but the mount and
 # the uuid map, both read-only by here. Eleven profiles done in turn is a hundred-odd
 # spawns waited for one at a time; this board has eight cores to do them on.
 #

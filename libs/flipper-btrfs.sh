@@ -1,13 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
-# flipper-btrfs.sh - shared helpers for the Flipper One btrfs profile/snapshot tooling.
-#
-# SOURCED, never executed. Defines the preamble (root/btrfs checks), the top-level
-# (subvolid=5) mount, and the small helpers duplicated across create-profile,
-# create-snapshot, delete-profile, delete-snapshot, list-profiles, list-snapshots,
-# btrfs-maintenance, receive-snapshot, rename-profile, send-snapshot, migrate-profile and btrfs-show-space.
-# Functions read globals lazily, so callers set what they need first.
+# flipper-btrfs.sh: shared helpers for the btrfs profile and snapshot tools. Sourced, never
+# executed: the root and btrfs checks, the top-level (subvolid=5) mount, and what the tools
+# would otherwise each carry a copy of. Functions read globals at call time.
 
 [ -r /usr/lib/flipper-rootinfo.sh ] || { echo "Error: /usr/lib/flipper-rootinfo.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-rootinfo.sh
@@ -17,31 +13,25 @@ die() { echo "Error: $*" >&2; exit 1; }
 need_root()  { [ "$(id -u)" -eq 0 ] || die "Must run as root (use sudo)"; }
 need_btrfs() { command -v btrfs >/dev/null 2>&1 || die "Btrfs-progs not installed"; }
 need_cmd()   { command -v "$1" >/dev/null 2>&1 || die "Command not installed: $1${2:+ ($2)}"; }
-# Guard for the -d/--device value: fail (with the tool's usage) if the flag was the last token.
-# Call with the arg count remaining AFTER shifting the flag off:
+# For the -d/--device value, with the arg count left after shifting the flag off:
 #   -d|--device) shift; need_device_arg "$#"; ROOTDEV=$1 ;;
 need_device_arg() { [ "$1" -ge 1 ] || { echo "Error: --device needs an argument" >&2; usage >&2; exit 1; }; }
 
-# True if / is a btrfs mount (a normally booted system, not a RAM recovery root).
+# True if / is a btrfs mount: a booted system, not a RAM recovery root.
 root_is_btrfs() { [ "$(findmnt -no FSTYPE / 2>/dev/null)" = btrfs ]; }
 
-# The two option help lines nearly every tool repeats verbatim in its usage(). Kept here so the
-# wording cannot drift between tools; interpolated inside their heredocs. migrate-profile spells
-# its own out, its -y means something more specific and its help column is wider.
+# The option lines the tools' usage() texts share, so the wording cannot drift.
 HELP_YES="  -y,--yes    assume yes to prompts (non-interactive)"
 HELP_DEVICE="  -d,--device operate on btrfs filesystem DEV instead of the booted root (e.g. recovery)"
 
-# UUID of the filesystem being operated on, empty if blkid cannot say. Never falls back to the
-# booted root's: under -d that is a different filesystem, so a fallback would hand every caller the
-# wrong UUID exactly when it cannot check. Callers that want the booted root when this is empty say
-# so themselves (flipper-bls.sh does, for the cmdline root=UUID).
+# UUID of the filesystem being operated on, empty if blkid cannot say. Never the booted root's:
+# under -d that is another filesystem.
 target_fsuuid() { blkid -o value -s UUID "${ROOTDEV:-}" 2>/dev/null; }
 
-# Non-interactive switch for confirm(): set to 1 by -y/--yes, or via the environment
-# (ASSUME_YES=1 <tool> ...) so the tools can run unattended from scripts.
+# Set to 1 by -y/--yes or ASSUME_YES=1 in the environment.
 ASSUME_YES=${ASSUME_YES:-0}
 
-# Ask on stderr, read stdin; abort unless yes. $1 may span lines. -y/--yes auto-confirms.
+# Ask on stderr, read stdin; abort unless yes.
 confirm() {
     if [ "$ASSUME_YES" = 1 ]; then printf '%s [auto-yes]\n' "$1" >&2; return 0; fi
     printf '%s [y/N] ' "$1" >&2
@@ -49,7 +39,7 @@ confirm() {
     case "$_a" in y|Y|yes|YES) return 0 ;; *) die "Aborted" ;; esac
 }
 
-# Reserved subvolumes the tools must never write/delete/rename.
+# Subvolumes the tools must never write, delete or rename.
 is_reserved_subvol() {
     case "$1" in
         @|@home|@root|@snapshots|@stock-snapshots|@var-log|@var-cache|boot) return 0 ;;
@@ -57,8 +47,7 @@ is_reserved_subvol() {
     esac
 }
 
-# Reject a profile (top-level subvol) name that would break rootflags=subvol= on the kernel
-# cmdline and leave the profile unbootable. Requires a leading '@' and only [A-Za-z0-9_-].
+# A profile name that works in rootflags=subvol=: a leading '@' and only [A-Za-z0-9_-].
 validate_profile_name() {
     case "$1" in
         *..*|/*|*/*) die "Invalid profile name: $1 (top-level name only, e.g. @Desktop-2)" ;;
@@ -72,16 +61,14 @@ validate_profile_name() {
     esac
 }
 
-# Serialize our writers: an exclusive advisory lock (flock) held on FD 9 for the script's
-# lifetime, released on any exit (including crash/kill). The holder records "PID (tool)" in the
-# file so a blocked waiter can say who it is waiting on. Read-only tools do not take it, and it
-# does NOT guard against concurrent native `btrfs` commands, which honor no lock.
+# The writers' lock: flock on FD 9 for the script's lifetime, holder recorded as "PID (tool)".
+# Read-only tools do not take it, and native `btrfs` commands honour no lock.
 LOCK_FILE=/run/flipper-btrfs.lock
 
-# True if we are the OPPOSITE end of a pipe from that pid (our stdout is its stdin, or the reverse).
-# Sharing the same end does not count: siblings from one shell inherit the same stdin. /proc names a
-# pipe as pipe:[<inode>], so the inode is the identity.
-pipe_shared_with() {  # $1 = pid
+# True if we are the opposite end of a pipe from $1. Sharing the same end does not count:
+# siblings from one shell inherit the same stdin.
+# $1 = pid
+pipe_shared_with() {
     _out=$(readlink "/proc/$$/fd/1" 2>/dev/null || true)
     _in=$(readlink "/proc/$$/fd/0" 2>/dev/null || true)
     case "$_out" in pipe:*) [ "$_out" = "$(readlink "/proc/$1/fd/0" 2>/dev/null || true)" ] && return 0 ;; esac
@@ -90,18 +77,16 @@ pipe_shared_with() {  # $1 = pid
 }
 
 set_lock() {
-    exec 9<>"$LOCK_FILE" || die "Cannot open lock $LOCK_FILE"   # <> = don't truncate the holder line
+    # <> keeps the holder line
+    exec 9<>"$LOCK_FILE" || die "Cannot open lock $LOCK_FILE"
     if ! flock -w 0 9 2>/dev/null; then
         _h=$(cat "$LOCK_FILE" 2>/dev/null); [ -n "$_h" ] || _h="PID unknown"
-        # the line is written by whoever holds it; if that process is gone the line is stale
-        # leftovers from a crash, so do not present it as the reason we are waiting
+        # A holder that is gone left a stale line after a crash.
         _hp=${_h#PID }; _hp=${_hp%% *}
         case "$_hp" in
             [0-9]*) kill -0 "$_hp" 2>/dev/null || _h="$_h, which is no longer running; the line is stale" ;;
         esac
-        # A holder on the other end of our pipe can never release: it is blocked reading what we
-        # have not written. Waiting is then a deadlock, so say so. A holder that merely shares our
-        # process group (a sibling job from one script) is not that case and must be waited for.
+        # A holder on the other end of our pipe is blocked on us and can never release.
         case "$_hp" in
             [0-9]*) if kill -0 "$_hp" 2>/dev/null && pipe_shared_with "$_hp"; then
                         die "$_h holds the lock and is on the other end of our pipe, so waiting would deadlock. Piping one of our tools into another on the same machine cannot work: write the stream to a file and read it back, or run one side on another host"
@@ -114,9 +99,8 @@ set_lock() {
     LOCK_HELD=1
 }
 
-# Drop the lock before a long read-only phase, so a writer does not queue behind work that no
-# longer mutates anything. The kernel releases the flock when the last descriptor closes, and
-# children inherit fd 9, so this only takes effect for what we start afterwards.
+# Drop the lock before a long read-only phase. Children inherited fd 9, so this only frees
+# what we start afterwards.
 release_lock() {
     [ "${LOCK_HELD:-0}" = 1 ] || return 0
     ( : > "$LOCK_FILE" ) 2>/dev/null || true
@@ -124,42 +108,33 @@ release_lock() {
     LOCK_HELD=0
 }
 
-# Mount the btrfs top level (subvolid=5) at a temp dir and arrange teardown on EXIT.
-# Sets ROOTDEV and TOP. Extra temp files to remove: assign them to TOP_TMPFILES first.
-# ROOTDEV may be preset (by -d/--device) to run against a filesystem that is not the
-# booted root, e.g. from a RAM recovery boot where / is not the btrfs filesystem.
+# Mount the btrfs top level (subvolid=5) at a temp dir, torn down on EXIT. Sets ROOTDEV and
+# TOP. Temp files to remove with it go in TOP_TMPFILES first. ROOTDEV may be preset by -d.
 mount_top() {
-    # Arm cleanup FIRST: callers set TOP_TMPFILES before calling us, so a die on the checks below
-    # (a bad -d argument, no btrfs root) must still take their temp files with it.
+    # Armed first, so a die on the checks below still removes the caller's temp files.
     trap 'top_cleanup' EXIT
-    # dash runs the EXIT trap on exit, not on a signal, so a plain kill would leave $TOP mounted;
-    # route the usual signals through exit so the cleanup happens once, in one place
+    # dash runs the EXIT trap on exit, not on a signal.
     trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
     [ -n "${ROOTDEV:-}" ] || ROOTDEV=$(findmnt -no SOURCE / | sed 's/\[.*//')
     [ -n "$ROOTDEV" ] || die "Cannot determine root device (use -d/--device)"
     [ -b "$ROOTDEV" ] || die "Not a block device: $ROOTDEV"
-    # NOT under /tmp: `rm -rf /tmp/tmp.*` while a tool holds its mount recurses through the whole
-    # filesystem, and rmdir removes an empty subvolume, so it deletes profiles, @home and boot.
-    # /run is tmpfs, root-only, and nobody sweeps it by glob.
+    # Not under /tmp: `rm -rf /tmp/tmp.*` while this is mounted recurses into the filesystem,
+    # and rmdir deletes an empty subvolume. /run is tmpfs, root-only, swept by nobody.
     TOP=$(mktemp -d /run/flipper-btrfs.mnt.XXXXXX 2>/dev/null || mktemp -d)
-    # -t btrfs, or the kernel offers the options to every filesystem it has
-    # registered and each logs its refusal of `subvolid` before btrfs accepts.
+    # -t btrfs, or every registered filesystem logs its refusal of `subvolid` first.
     _err=$(mount -t btrfs -o subvolid=5 "$ROOTDEV" "$TOP" 2>&1) || die "Mount failed: $_err"
 }
 
-# Best-effort was not good enough: on a signal the children (btrfs send/receive, zstd) are still
-# dying, so the first umount can lose the race with EBUSY and the top-level mount leaks for the rest
-# of the uptime. Retry briefly, then detach lazily so it goes away once the last reference does.
+# On a signal the children (btrfs send/receive, zstd) are still dying, so the first umount can
+# lose to EBUSY. Retry, then detach lazily.
 top_cleanup() {
-    # the holder line outlives the flock the kernel drops for us, so blank it: no waiter should read
-    # a pid gone for days. Subshell: a failed '>' on the special builtin ':' exits the shell outright,
-    # too early for '|| true' to catch, and the unmount below still has to run
+    # Blank the holder line, which outlives the flock. In a subshell: a failed '>' on the
+    # builtin ':' exits the shell before '|| true' can catch it.
     [ "${LOCK_HELD:-0}" = 1 ] && ( : > "$LOCK_FILE" ) 2>/dev/null || true
     if [ -n "${TOP:-}" ]; then
         for _i in 1 2 3 4 5; do
             umount "$TOP" 2>/dev/null && break
-            # the callers run under set -e, where a failing detach would abort the trap and
-            # abandon the mount
+            # Under set -e a failing detach would abort the trap and abandon the mount.
             [ "$_i" = 5 ] && umount -l "$TOP" 2>/dev/null || true
             sleep 1
         done
@@ -169,10 +144,8 @@ top_cleanup() {
     return 0
 }
 
-# Resolve a subvol NAME to its top-relative path: as given ($TOP/<name>, e.g. a full
-# @snapshots/<name> or @stock-snapshots/@X_stock path), else a bare name found under @snapshots
-# (restore points) or @stock-snapshots (golden bases). Prints the path relative to $TOP; empty if
-# none exists. Needs $TOP.
+# A subvolume name to its top-relative path: as given, else under @snapshots or
+# @stock-snapshots. Empty if none exists. Needs $TOP.
 resolve_rel() {
     if   [ -e "$TOP/$1" ];                  then printf '%s' "$1"
     elif [ -e "$TOP/@snapshots/$1" ];       then printf '%s' "@snapshots/$1"
@@ -185,23 +158,23 @@ get() { printf '%s\n' "$1" | awk -v k="$2" -F':[[:space:]]+' 'index($0,k){print 
 
 subvol_id() { get "$(btrfs subvolume show "$1" 2>/dev/null)" "Subvolume ID"; }
 
-# True only when the filesystem being operated on is PROVEN to be another one than we booted from.
-# Unprovable counts as the same: a probe that cannot answer must not disarm the refusals below.
-target_fs_differs() {  # needs ROOTDEV
+# True only when the filesystem operated on is proven to be another than the booted one.
+# Unprovable counts as the same, so the refusals below stay armed.
+# needs ROOTDEV
+target_fs_differs() {
     root_is_btrfs || return 0
     _bu=$(booted_fsuuid); _tu=$(target_fsuuid)
     [ -n "$_bu" ] && [ -n "$_tu" ] && [ "$_bu" != "$_tu" ]
 }
 
-# The profile running from the filesystem being operated on, empty when nothing runs from it: ids
-# and names repeat across filesystems, so a match there would be coincidence.
+# The running profile on the filesystem operated on, empty when nothing runs from it.
 target_running_id()     { target_fs_differs && return 0; subvol_id / ; }
 target_running_subvol() { target_fs_differs && return 0; booted_subvol ; }
 
-# True if subvolume id $1 is the running profile's $2 (from target_running_id). An empty running id
-# never matches: it means another filesystem, where '=' alone would pair it with any lookup that also
-# came back empty, such as a path that is not a subvolume at all.
-is_running_id() {  # $1 = candidate id  $2 = target_running_id
+# True if subvolume id $1 is the running profile's $2. An empty $2 never matches: '=' alone
+# would pair it with any lookup that also came back empty.
+# $1 = candidate id  $2 = target_running_id
+is_running_id() {
     [ -n "$2" ] && [ "$1" = "$2" ]
 }
 
@@ -212,8 +185,7 @@ is_ro() {
     esac
 }
 
-# The timestamp every generated name uses (snapshots, aside copies, ro sends). One helper so
-# the names stay mutually parseable: list-profiles keys KIND=old off this exact shape.
+# The timestamp every generated name uses; list-profiles keys KIND=old off this shape.
 stamp() { date +%Y-%m-%d_%H-%M-%S; }
 
 # Top-relative path of the subvolume with this uuid, empty if none. $1 = top mount, $2 = uuid.
@@ -225,12 +197,10 @@ path_of_uuid() {
           if (uu==u){print p; exit} }'
 }
 
-# A byte count for a person to read, in decimal: 1 GB is 10^9 bytes, which is what a
-# desktop's own system monitor and the sticker on the part both say. --to=iec would
-# divide by 1024 and still label the result GB, which is the conflation this avoids.
+# A byte count for a person, decimal: 1 GB is 10^9, as the sticker on the part says.
 human() { numfmt --to=si --suffix=B --format='%.1f' "${1:-0}" 2>/dev/null || printf '%s' "${1:-0}"; }
 
-# uuid -> "id <tab> path" for every subvolume, so parents resolve by UUID. $1 = top, $2 = out file.
+# uuid -> "id <tab> path" for every subvolume. $1 = top, $2 = out file.
 build_uuid_map() {
     btrfs subvolume list -qu "$1" 2>/dev/null | awk '
     {
@@ -244,7 +214,7 @@ build_uuid_map() {
     }' > "$2"
 }
 
-# Resolve a parent UUID to "name (id)" via a map from build_uuid_map. $1 = map file, $2 = uuid.
+# A parent UUID as "name (id)" via a build_uuid_map file. $1 = map file, $2 = uuid.
 parent_of() {
     case "$2" in ''|'-') printf '%s' "-"; return ;; esac
     awk -F'\t' -v u="$2" '
@@ -252,27 +222,25 @@ parent_of() {
         END   { if (!f) printf "-" }' "$1"
 }
 
-# Print a TSV file with every column padded to its max width; last field left unpadded.
+# A TSV file with every column padded to its width, the last left unpadded.
 align_table() {
     awk -F'\t' '
     { line[NR]=$0; nf=split($0,a,"\t"); for (i=1;i<=nf;i++) if (length(a[i])>w[i]) w[i]=length(a[i]) }
     END {
         for (r=1; r<=NR; r++) {
             n=split(line[r], a, "\t"); out=""
-            # The width is built into the format rather than passed as a star
-            # argument: mawk supports "%-*s" in some builds and refuses it in
-            # others ("%*x formats are not supported"), and the boot menu image
-            # carries one of the ones that refuses.
+            # The width goes into the format: some mawk builds refuse "%-*s", and the boot
+            # menu image carries one of them.
             for (i=1; i<=n; i++) out = (i<n) ? out sprintf("%-" w[i] "s  ", a[i]) : out a[i]
             print out
         }
     }' "$1"
 }
 
-# Run a flipper-bls.sh function against the filesystem being operated on: its entries directory and
-# its UUID for the cmdline, not the running root's under -d. Subshell so the library's die cannot
-# abort us; a failure warns and returns, as the boot entry is never the point of the operation.
-with_bls() {  # $1 = what fails, for the warning; rest = function and arguments. Needs TOP
+# Run a flipper-bls.sh function against the filesystem operated on. In a subshell, so the
+# library's die cannot abort us: the entry is never the point of the operation.
+# $1 = what fails, for the warning; rest = function and arguments. Needs TOP
+with_bls() {
     _what=$1; shift
     _lib=/usr/lib/flipper-bls.sh
     if [ -r "$_lib" ]; then
@@ -284,10 +252,8 @@ with_bls() {  # $1 = what fails, for the warning; rest = function and arguments.
     return 0
 }
 
-# Stamp a _stock's factory-origin marker (/etc/profile_origin) so migrate-profile can find a
-# profile's base after the btrfs parent chain is broken by deletions. Profiles snapshotted from
-# the stock inherit the file; matching later is by name, not by uuid (a snapshot clears that).
-# The name carries the build id (@Desktop_744_stock), so it identifies the exact base on its own.
+# Stamp a _stock's origin marker (/etc/profile_origin), which snapshots inherit, so
+# migrate-profile finds a profile's base by name after the parent chain is broken.
 # $1 = the stock's mounted dir, $2 = the stock's name (e.g. @Desktop_744_stock).
 stamp_stock_origin() {
     printf 'origin_stock_name=%s\n' "$2" > "$1/etc/profile_origin"

@@ -57,7 +57,8 @@ have_cs=0
 if [ "$quick" = 0 ] && command -v compsize >/dev/null 2>&1; then have_cs=1; fi
 
 # Measure one subvolume: sets M_TOT / M_EXC (bytes) and M_REF (bytes, or '' when compsize is off).
-measure() {  # $1 = fs path
+# $1 = fs path
+measure() {
     _line=$(btrfs filesystem du -s --raw "$1" 2>/dev/null | awk 'NR==2{print $1, $2}')
     M_TOT=$(printf '%s' "$_line" | awk '{print $1}'); case "$M_TOT" in ''|*[!0-9]*) M_TOT=0 ;; esac
     M_EXC=$(printf '%s' "$_line" | awk '{print $2}'); case "$M_EXC" in ''|*[!0-9]*) M_EXC=0 ;; esac
@@ -95,7 +96,8 @@ echo "== filesystem =="
 btrfs filesystem usage -T "$TOP"
 echo
 
-row() {  # $1=display name  $2=fs path  -> append a TSV row
+# $1=display name  $2=fs path  -> append a TSV row
+row() {
     measure "$2"
     if [ "$have_cs" = 1 ]; then ref_h=$(human "$M_REF"); else ref_h="-"; fi
     id=$(subvol_id "$2")

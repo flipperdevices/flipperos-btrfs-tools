@@ -1,18 +1,12 @@
 #!/bin/sh
-# flipper-bless-boot - the boot worked, so stop counting it. Removes the BLS boot counter from the
-# entry this system booted from, which the spec calls making it 'good'.
+# flipper-bless-boot: the boot worked, so remove the entry's boot counter (the spec's 'good').
 #
-# Run once per boot by flipper-bless-boot.service, which requires boot-complete.target. What that
-# target means is Debian's own judgement, not ours: with systemd-boot-check-no-failures.service
-# enabled it is only reached when no unit failed, so a boot that comes up without its panel or
-# without its network never blesses the kernel that did it.
+# Run once per boot by flipper-bless-boot.service after boot-complete.target, which with
+# systemd-boot-check-no-failures.service enabled means no unit failed.
 #
-# Which entry booted, in the order this looks for it: the id a soft-reboot left in
-# /run/flipper-boot-entry, then the kernel this system runs and the subvolume it is on, which name
-# exactly one entry now that a root holds at most one per kernel. The second is what a boot-menu
-# pivot needs: it boots no kernel, so the command line it inherits belongs to the menu. Nothing of
-# ours goes on that command line. Missing counter, missing id or missing file are all quiet
-# successes: an entry with no counter is already good, and there is nothing to repair.
+# Which entry booted: the id a soft-reboot left in /run/flipper-boot-entry, else the running
+# kernel plus the mounted subvolume, which name exactly one entry. Nothing of ours is on the
+# command line. A missing counter, id or file is a quiet success.
 set -eu
 [ -r /usr/lib/flipper-blsname.sh ] || { echo "flipper-bless-boot: /usr/lib/flipper-blsname.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-blsname.sh
@@ -27,10 +21,8 @@ if [ -r "$NOTE" ]; then
     read -r id < "$NOTE" || id=""
 fi
 
-# No note, which is what a boot-menu pivot leaves: it does not survive init's shutdown pass and
-# switch_root. Work it out instead -- the kernel this system is running and the subvolume it is on
-# name one entry between them, since an entry id is built from exactly those two things. More than
-# one match would mean duplicate entries, and then guessing is worse than doing nothing.
+# No note is what a boot-menu pivot leaves: /run does not survive init's shutdown pass.
+# More than one match is duplicate entries, and guessing is worse than doing nothing.
 if [ -z "$id" ]; then
     sv="$(booted_subvol)"; rel="$(uname -r)"
     hits=""
@@ -58,11 +50,8 @@ for f in $(entry_files_for "$id"); do
     blessed=1
 done
 if [ "$blessed" = 1 ]; then
-    # A rename is metadata, and on btrfs metadata reaches the disk with the next
-    # transaction commit, up to `commit=` seconds later. Lose that and the counter comes
-    # back on a machine that just proved it boots, so the next boots spend tries again
-    # and three of them make the entry bad. boot-profile syncs before every handover for
-    # the same reason; this is the other half of the counter's life.
+    # A rename reaches the disk with the next btrfs commit; lost, the counter comes back on a
+    # machine that just proved it boots.
     sync
 fi
 [ "$blessed" = 1 ] || echo "flipper-bless-boot: $id carries no counter, already good"

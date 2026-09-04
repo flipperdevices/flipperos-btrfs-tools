@@ -131,7 +131,7 @@ case "$_action" in
         # A filesystem whose entries were written before the order was in them, or under an older
         # rule. Every band is recomputed from the entry's own token rather than kept: a band is a
         # position in the profile list, and a stale one is how a clone ends up ahead of the profile
-        # it came from. Counters are left alone -- an entry that boots today is proven, and putting
+        # it came from. Counters are left alone: an entry that boots today is proven, and putting
         # a whole disk on trial would be a lie.
         #
         # Which profile boots by itself: the one that already holds the digit, else the lowest band
@@ -148,8 +148,8 @@ case "$_action" in
             done | sort -n | head -n1 | cut -d' ' -f2)"
         fi
         # Before deciding anything, put each entry's timestamp back to the kernel it names. The
-        # order breaks ties by newest file, and "newest" is meant to say when that kernel arrived
-        # -- but an entry file is also rewritten whenever an overlay or a key changes, and an
+        # order breaks ties by newest file, and "newest" is meant to say when that kernel arrived,
+        # but an entry file is also rewritten whenever an overlay or a key changes, and an
         # upgrade from before this scheme has no true timestamps left at all. The kernel image
         # itself is the honest record: it was written when the package was installed.
         for _f in "$ENTRIES"/*.conf; do

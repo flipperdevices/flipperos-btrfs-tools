@@ -67,7 +67,8 @@ TOP_TMPFILES="$send_stat"
 # deadlocks a local 'send-snapshot - | receive-snapshot -'.
 mount_top
 
-parent_path_of() {  # $1 = fs path -> top-relative path of its parent subvol (empty if none)
+# $1 = fs path -> top-relative path of its parent subvol (empty if none)
+parent_path_of() {
     path_of_uuid "$TOP" "$(get "$(btrfs subvolume show "$1" 2>/dev/null)" "Parent UUID")"
 }
 
@@ -118,12 +119,14 @@ if [ -n "$parent" ]; then
     is_ro "$parentpath" || die "Parent $parent must be read-only"
 fi
 
-do_send() {  # record btrfs send's exit; the pipe hides it (no pipefail in POSIX sh)
+# record btrfs send's exit; the pipe hides it (no pipefail in POSIX sh)
+do_send() {
     if [ -n "$parentpath" ]; then btrfs send -p "$parentpath" "$srcpath"
     else btrfs send "$srcpath"; fi
     echo $? >"$send_stat"
 }
-emit() {  # silence zstd when pv shows progress (avoid two bars on one line)
+# silence zstd when pv shows progress (avoid two bars on one line)
+emit() {
     pg=""; [ "$have_pv" = 1 ] && pg="--no-progress"
     if [ "$dest" = "-" ]; then zstd -T0 $pg; else zstd -T0 $pg -o "$dest"; fi
 }

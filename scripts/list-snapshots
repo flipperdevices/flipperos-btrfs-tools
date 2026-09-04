@@ -41,7 +41,8 @@ mount_top
 [ -d "$TOP/@snapshots" ] || die "@snapshots not found at top level"
 build_uuid_map "$TOP" "$map"
 
-emit() {  # $1=display name  $2=fs path
+# $1=display name  $2=fs path
+emit() {
     info=$(btrfs subvolume show "$2" 2>/dev/null) || return 0
     id=$(get "$info" "Subvolume ID")
     otime=$(get "$info" "Creation time"); otime=${otime% +*}

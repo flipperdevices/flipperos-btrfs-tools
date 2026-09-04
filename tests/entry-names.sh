@@ -110,15 +110,14 @@ ck "key rewritten"       "$(sort_key_field "$d/600-x.conf" rank)" "0"
 ck "timestamp kept"      "$(stat -c %Y "$d/600-x.conf")" "$_before"
 ck "no leftover ref"     "$(ls "$d" | grep -c order-ref || true)" "0"
 
-# The entry has to name itself on the command line or a good boot cannot bless it, and adding
-# that must not move the timestamp either.
-_before="$(stat -c %Y "$d/600-x.conf")"
-set_cmdline_entry_id "$d/600-x.conf" "600-flipperos-Minimal-7.2.0-a"
-ck "names itself"        "$(sed -n 's/^options[[:space:]]*//p' "$d/600-x.conf" | tr ' ' '\n' | sed -n 's/^flipper.entry=//p')" "600-flipperos-Minimal-7.2.0-a"
-ck "id write kept time"  "$(stat -c %Y "$d/600-x.conf")" "$_before"
-set_cmdline_entry_id "$d/600-x.conf" "600-flipperos-Minimal-7.2.0-b"
-ck "one id only"         "$(sed -n 's/^options[[:space:]]*//p' "$d/600-x.conf" | tr ' ' '\n' | grep -c 'flipper.entry=')" "1"
-ck "id replaced"         "$(sed -n 's/^options[[:space:]]*//p' "$d/600-x.conf" | tr ' ' '\n' | sed -n 's/^flipper.entry=//p')" "600-flipperos-Minimal-7.2.0-b"
+# What identifies a booted entry is its subvolume and its kernel version, so removing by content
+# has to catch an entry written under a different token for the same pair.
+mk "600-flipperos-Minimal-7.2.0-a+3-0.conf"     "debian-1400-Minimal-0" "@Minimal"
+printf 'version 7.2.0-a\n' >> "$d/600-flipperos-Minimal-7.2.0-a+3-0.conf"
+mk "601-flipperos-Minimal-7.2.0-a+3-0.conf"     "debian-1401-Minimal-0" "@Minimal"
+printf 'version 7.2.0-a\n' >> "$d/601-flipperos-Minimal-7.2.0-a+3-0.conf"
+ENTRIES="$d" remove_entries "@Minimal" "7.2.0-a"
+ck "both tokens removed" "$(ls "$d" | grep -c 'flipperos-Minimal-7.2.0-a' || true)" "0"
 
 # Re-arming a blessed entry, and one already on trial.
 ck "rearm blessed" "$(basename "$(rearm_entry "$d/800-flipperos-TV-Media-Box-7.2.0-a.conf")")" "800-flipperos-TV-Media-Box-7.2.0-a+3-0.conf"

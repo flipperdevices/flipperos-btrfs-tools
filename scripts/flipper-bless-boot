@@ -7,12 +7,12 @@
 # enabled it is only reached when no unit failed, so a boot that comes up without its panel or
 # without its network never blesses the kernel that did it.
 #
-# Which entry booted is on the kernel command line, as flipper.entry=<id>: nothing else in a
-# running system says which of a profile's entries it came from. A boot that PIVOTED has the
-# command line of whatever was running before it -- a pivot boots no kernel -- so boot-profile
-# leaves the id in /run/flipper-boot-entry as well, and that is read when the command line says
-# nothing. Missing counter, missing id or missing file are all quiet successes: an entry with no
-# counter is already good, and there is nothing to repair.
+# Which entry booted, in the order this looks for it: the id a soft-reboot left in
+# /run/flipper-boot-entry, then the kernel this system runs and the subvolume it is on, which name
+# exactly one entry now that a root holds at most one per kernel. The second is what a boot-menu
+# pivot needs: it boots no kernel, so the command line it inherits belongs to the menu. Nothing of
+# ours goes on that command line. Missing counter, missing id or missing file are all quiet
+# successes: an entry with no counter is already good, and there is nothing to repair.
 set -eu
 [ -r /usr/lib/flipper-blsname.sh ] || { echo "flipper-bless-boot: /usr/lib/flipper-blsname.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-blsname.sh
@@ -23,15 +23,11 @@ ENTRIES="${FLIPPER_ENTRIES:-/boot/loader/entries}"
 NOTE="${FLIPPER_ENTRY_NOTE:-/run/flipper-boot-entry}"
 
 id=""
-for w in $(cat /proc/cmdline 2>/dev/null); do
-    case "$w" in flipper.entry=*) id=${w#flipper.entry=} ;; esac
-done
-if [ -z "$id" ] && [ -r "$NOTE" ]; then
+if [ -r "$NOTE" ]; then
     read -r id < "$NOTE" || id=""
 fi
 
-# Neither said anything, which is what a pivot leaves: it boots no kernel, so the command line is
-# the one already running, and the note in /run does not survive init's shutdown pass and
+# No note, which is what a boot-menu pivot leaves: it does not survive init's shutdown pass and
 # switch_root. Work it out instead -- the kernel this system is running and the subvolume it is on
 # name one entry between them, since an entry id is built from exactly those two things. More than
 # one match would mean duplicate entries, and then guessing is worse than doing nothing.

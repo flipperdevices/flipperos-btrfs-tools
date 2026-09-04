@@ -88,10 +88,11 @@ steps the profile's other entries down to rank 1, and gives it a full boot count
 boot three times running, it becomes 'bad', sorts last, and the kernel that was booting before
 leads again with nothing to undo. Which profile boots by itself is untouched by an install.
 
-A boot names its entry as `flipper.entry=<id>` on the kernel command line, and a pivot -- which
-boots no kernel and so inherits the command line of whatever was running -- leaves the same id in
-`/run/flipper-boot-entry`. `flipper-bless-boot` reads whichever is there. Without the second, a
-pivoted boot would spend a try it could never bless and take a working entry to 'bad' in three.
+Which entry a running system came from is the kernel it runs plus the subvolume it is on: a root
+holds at most one entry per kernel, because installing one removes whatever that root already had
+for that version, whatever token it was written under. `flipper-bless-boot` works it out from
+those two, and reads `/run/flipper-boot-entry` first where a soft-reboot left it. Nothing of ours
+goes on the kernel command line.
 
 Attempts are counted the way the spec describes, in the entry's file name:
 `…-7.2.0-ga0d2d145deeb+2-1.conf` has two tries left and one spent. `boot-profile` counts one at the

@@ -237,17 +237,6 @@ set_sort_key() {  # $1 = entry file, $2 = key
     fi
 }
 
-# Make an entry's command line name the entry, as flipper.entry=<id>.
-#
-# The only thing in a booted system that says which entry it came from, and what
-# flipper-bless-boot reads to know what to bless. Written by the library that creates entries; this
-# is for the ones that already exist, which is every entry an older image left behind.
-set_cmdline_entry_id() {  # $1 = entry file, $2 = id
-    edit_entry "$1" \
-        "s/[[:space:]]\{1,\}flipper\.entry=[^[:space:]]*//g" \
-        "/^options[[:space:]]/ s|\$| flipper.entry=$2|"
-}
-
 # Rewrite one entry's key, keeping every field the caller passes '-' for. An entry whose key
 # carries no suffix of ours is stamped from scratch, band and all, so this is also how an entry
 # written before the order was in them gets repaired.

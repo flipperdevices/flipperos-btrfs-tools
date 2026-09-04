@@ -247,13 +247,13 @@ make_title() {
 
 # write_entry FILE TITLE OPTIONS FDTOVERLAYS
 #
-# The entry names itself on the kernel command line as flipper.entry=<id>: that is how
-# flipper-bless-boot knows which file to bless once the boot is good, and there is nothing else in
-# a booted system that says which entry it came from. Added here rather than in the base options,
-# so it cannot leak into anything that compares command lines between entries.
+# Nothing of ours goes on the command line. What booted is worked out from the kernel a system is
+# running and the subvolume it is on, which name one entry between them now that a root holds at
+# most one entry per kernel (see emit_entry). An id on the command line said the same thing less
+# well: a pivot boots no kernel, so it inherits the line of whatever ran before and the id there
+# belongs to the wrong entry.
 write_entry() {
     _f="$1"; _title="$2"; _opts="$3"; _fdtov="$4"
-    _opts="$_opts flipper.entry=$(entry_id_of "$_f")"
     # devicetreedir is prefixed with THIS entry's root subvol (U-Boot reads subvolid 5)
     _dtdir=""; [ -n "$DEVICETREEDIR_REL" ] && _dtdir="$(fdt_prefix "$_opts")$DEVICETREEDIR_REL"
     {
@@ -439,11 +439,13 @@ emit_entry() {
 
     _opts="$BASE_OPTS"
     [ -n "$_extra" ] && _opts="$_opts $_extra"
-    # A new entry is untried, so it is written with a full counter. Anything already there for this
-    # id goes first, counter or not: the id is what identifies an entry, and two files for one id
-    # would both be listed.
+    # A new entry is untried, so it is written with a full counter. Whatever this root already has
+    # for this kernel goes first, by CONTENT rather than by id: a token can change under a profile
+    # (a rename, a re-band), and an id-scoped delete would leave the old token's file behind. Two
+    # entries naming one kernel in one subvolume are indistinguishable from a booted system, which
+    # is what stops a good boot from being blessed.
     _id="$ENTRY_TOKEN-$KERNEL_VERSION"
-    for _old in $(entry_files_for "$_id"); do rm -f "$_old"; done
+    remove_entries "$(subvol_of "$_opts")" "$KERNEL_VERSION"
     _fn="$ENTRIES/$_id$(new_counter).conf"
     if [ "$_ovl_override" = 1 ]; then
         _line="$5"
@@ -500,11 +502,10 @@ flipper_write_entry() {
     OVERLAY_USER_ROOT="$_snap"                  # scan the TARGET root's drop-ins, not the running one
     # pin the root's own entry-token so a later runtime apt install in it lands in the same band
     mkdir -p "$_snap/etc/kernel" && printf '%s\n' "$ENTRY_TOKEN" > "$_snap/etc/kernel/entry-token"
-    # Remove any existing entry for this root+version first. The entry filename holds a sort
-    # number tied to the profile's btrfs snapshot depth, which changes when a profile is
-    # re-created; a new entry would then get a different filename instead of overwriting the
-    # old one, leaving a duplicate. Deleting first refreshes it in place.
-    remove_entries "$_name" "$KERNEL_VERSION"
+    # No removal here: emit_entry below clears whatever this root has for this kernel, whatever
+    # token it carries, which is what a re-created profile needs -- its snapshot depth moves the
+    # sort number in the filename, so a new entry would land beside the old one instead of over
+    # it.
     # Inherit overlays: copy the source profile's system overlays (re-pointed to this subvol) plus
     # this root's own user drop-ins, so a clone matches its source and a factory reset gets the
     # base profile's factory overlays.

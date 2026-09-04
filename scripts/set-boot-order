@@ -179,12 +179,7 @@ case "$_action" in
             for _c in $_chosen; do [ "$_c" = "$(entry_id_of "$_f")" ] && _r=0; done
             _b="$(sort_band "$(token_band "$(entry_id_of "$_f")")")"
             restamp "$_f" "$_a" "$_r" "${_b:--}"
-            # An entry written before the scheme does not name itself on its command line, so a
-            # good boot of it could never be blessed and it would spend tries forever.
             _id="$(entry_id_of "$_f")"
-            _named="$(sed -n 's/^options[[:space:]]\{1,\}//p' "$_f" | head -n1 | tr ' ' '\n' \
-                | sed -n 's/^flipper\.entry=//p' | head -n1)"
-            [ "$_named" = "$_id" ] || set_cmdline_entry_id "$_f" "$_id"
             echo "set-boot-order: stamped $_id as $(sed -n 's/^sort-key[[:space:]]\{1,\}//p' "$_f" | head -n1)"
         done
         echo "set-boot-order: $_have_auto boots when nobody presses anything"

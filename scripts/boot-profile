@@ -37,6 +37,16 @@ Usage: boot-profile [--dry-run] [--no-pivot] [-d|--device DEV] <entry|@profile>
               boot of the same entry hands over without loading anything. Nothing to arm
               for a profile that would be pivoted into, and nothing is loaded then
   --disarm    discard an image left loaded by --arm. Takes no profile
+
+  Booting something that is not a profile, for testing one before it is installed.
+  Neither reads the boot order or any entry, neither takes a profile, and both always
+  kexec: there is no filesystem already running the kernel under test to pivot into.
+  --image F         kexec a FIT (.itb): its configuration for this board is picked by
+                    compatible, and its kernel, ramdisk and device tree are read out of it
+  --initramfs F     kexec this initramfs (.cpio, .cpio.zst) on the running kernel and the
+                    running device tree, which is what testing an initramfs means
+  --kernel F        with --initramfs, boot that kernel instead of the running one
+  --cmdline STR     the command line to boot with, in place of the running one
 $HELP_DEVICE
 EOF
 }
@@ -45,6 +55,11 @@ dry=0
 no_pivot=0
 arm=0
 disarm=0
+image=
+initramfs=
+kernel=
+cmdline=
+need_file_arg() { [ "$1" -ge 1 ] || { echo "Error: $2 needs a file" >&2; usage >&2; exit 1; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)   dry=1 ;;
@@ -53,6 +68,14 @@ while [ $# -gt 0 ]; do
         --disarm)    disarm=1 ;;
         -d|--device) shift; need_device_arg "$#"; ROOTDEV=$1 ;;
         --device=*)  ROOTDEV=${1#*=} ;;
+        --image)     shift; need_file_arg "$#" --image; image=$1 ;;
+        --image=*)   image=${1#*=} ;;
+        --initramfs) shift; need_file_arg "$#" --initramfs; initramfs=$1 ;;
+        --initramfs=*) initramfs=${1#*=} ;;
+        --kernel)    shift; need_file_arg "$#" --kernel; kernel=$1 ;;
+        --kernel=*)  kernel=${1#*=} ;;
+        --cmdline)   shift; need_file_arg "$#" --cmdline; cmdline=$1 ;;
+        --cmdline=*) cmdline=${1#*=} ;;
         -h|--help)   usage; exit 0 ;;
         --)          shift; break ;;
         -?*)         echo "Error: unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -74,6 +97,188 @@ kexec_wait() {
     return 0
 }
 
+# To stderr for whoever ran it, to the kernel log for whoever reads the boot afterwards.
+say() {
+    echo "boot-profile: $*" >&2
+    [ -w /dev/kmsg ] && echo "boot-profile: $*" > /dev/kmsg 2>/dev/null
+    return 0
+}
+
+# Copy this machine's /memory node onto the assembled device tree with libfdt (0.03s).
+#
+# A shipped dtb describes the board, not its RAM: U-Boot writes /memory at every cold
+# boot, and without it a kernel dies before it has a console. The node is copied, not
+# constructed, so the name and the banks stay firmware's. The reserve map is not copied:
+# it describes the running boot's initrd. A failure is a die, because the kernel this
+# would load hangs and says nothing.
+graft_firmware_memory() {
+    [ -r /sys/firmware/fdt ] || return 0
+    ! fdtget -l "$1" / 2>/dev/null | grep -qE '^memory(@|$)' || return 0
+    command -v fdtput >/dev/null 2>&1 && command -v fdtget >/dev/null 2>&1 \
+        || die "no fdtput to graft this machine's memory node with"
+    # reg is copied as raw cells, so the two trees have to agree on what a cell means.
+    for _c in '#address-cells' '#size-cells'; do
+        [ "$(fdtget -t u /sys/firmware/fdt / "$_c" 2>/dev/null)" = "$(fdtget -t u "$1" / "$_c" 2>/dev/null)" ] \
+            || die "the live and the assembled device tree disagree on $_c; no memory node can be copied"
+    done
+    _node=$(fdtget -l /sys/firmware/fdt / 2>/dev/null | grep -m1 '^memory') && [ -n "$_node" ] \
+        || die "the live device tree has no memory node to copy"
+    _reg=$(fdtget -t x /sys/firmware/fdt "/$_node" reg 2>/dev/null) && [ -n "$_reg" ] \
+        || die "the live memory node has no reg"
+    _dt=$(fdtget -ts /sys/firmware/fdt "/$_node" device_type 2>/dev/null) || _dt=memory
+    # shellcheck disable=SC2086
+    fdtput -c "$1" "/$_node" 2>/dev/null \
+        && fdtput -ts "$1" "/$_node" device_type "$_dt" 2>/dev/null \
+        && fdtput -t x "$1" "/$_node" reg $_reg 2>/dev/null \
+        || die "fdtput could not write the memory node into the assembled device tree"
+    # libfdt edits in place with no compile to catch a broken tree, so read it back.
+    [ "$(fdtget -t x "$1" "/$_node" reg 2>/dev/null)" = "$_reg" ] \
+        || die "the memory node written into the assembled device tree does not read back"
+    say "grafted this machine's memory node onto the profile's device tree"
+}
+
+# Where a FIT keeps an image's bytes when mkimage was given -E.
+#
+# The tree then holds only data-offset and data-size, and the bytes sit after the tree
+# itself, which is what the offset counts from. Read that from the header rather than
+# assuming a size: nothing says a tree is any particular length.
+fit_base() {
+    _f=$1
+    # shellcheck disable=SC2046
+    set -- $(od -An -tx1 -j4 -N4 "$_f")
+    echo $(( 0x$1 * 16777216 + 0x$2 * 65536 + 0x$3 * 256 + 0x$4 ))
+}
+
+# One image out of a FIT, wherever mkimage put its bytes.
+fit_extract() {
+    _itb=$1; _node=$2; _out=$3
+    _size=$(fdtget -tu "$_itb" "/images/$_node" data-size 2>/dev/null) || _size=
+    if [ -n "$_size" ]; then
+        _pos=$(fdtget -tu "$_itb" "/images/$_node" data-position 2>/dev/null) || _pos=
+        [ -n "$_pos" ] || {
+            _off=$(fdtget -tu "$_itb" "/images/$_node" data-offset 2>/dev/null) \
+                || die "$_node has a size but neither data-offset nor data-position"
+            _pos=$(( $(fit_base "$_itb") + _off ))
+        }
+        dd if="$_itb" of="$_out" bs=1M iflag=skip_bytes,count_bytes \
+            skip="$_pos" count="$_size" status=none 2>/dev/null \
+            || die "cannot read $_node out of $_itb"
+    else
+        # No -E: the bytes are a property inside the tree.
+        fdtget -tr "$_itb" "/images/$_node" data > "$_out" 2>/dev/null \
+            || die "$_node carries no data"
+    fi
+    [ -s "$_out" ] || die "$_node came out of $_itb empty"
+}
+
+# The configuration for this board, chosen the way U-Boot chooses one: the first
+# compatible of a configuration against the first compatible of the running tree. A FIT
+# built for several board revisions carries one configuration each, and the wrong one
+# boots a device tree for hardware this is not.
+fit_config() {
+    _itb=$1
+    _live=$(fdtget -ts /sys/firmware/fdt / compatible 2>/dev/null | head -1)
+    if [ -n "$_live" ]; then
+        for _c in $(fdtget -l "$_itb" /configurations 2>/dev/null); do
+            [ "$(fdtget -ts "$_itb" "/configurations/$_c" compatible 2>/dev/null | head -1)" = "$_live" ] \
+                || continue
+            echo "$_c"; return 0
+        done
+        say "no configuration in $_itb is compatible with $_live; taking the default"
+    fi
+    fdtget -ts "$_itb" /configurations default 2>/dev/null
+}
+
+# Which image a configuration means by "kernel" or "ramdisk".
+#
+# A falcon configuration names neither: it lists what the loader is to place in memory
+# and leaves the kind to each image's own type, so ask the images.
+fit_image_of() {
+    _itb=$1; _cfg=$2; _want=$3
+    for _n in $(fdtget -ts "$_itb" "/configurations/$_cfg" loadables 2>/dev/null) \
+              $(fdtget -ts "$_itb" "/configurations/$_cfg" "$_want" 2>/dev/null); do
+        [ "$(fdtget -ts "$_itb" "/images/$_n" type 2>/dev/null)" = "$_want" ] || continue
+        echo "$_n"; return 0
+    done
+    return 1
+}
+
+# Boot an image that is not a profile: no boot order, no entry, no subvolume.
+#
+# Only ever a kexec. A pivot is switch_root or soft-reboot into a filesystem that is
+# already running this kernel, and neither means anything for an image being tested.
+boot_raw() {
+    need_root
+    command -v kexec >/dev/null 2>&1 || die "kexec not installed (kexec-tools)"
+    [ "$arm" = 0 ] || die "--arm records which profile it armed; --image and --initramfs boot no profile"
+    # There is nothing to pivot into. A pivot enters a filesystem already running this
+    # kernel; an image being tested is the thing being changed, so the option would be
+    # a no-op and is refused rather than ignored.
+    [ "$no_pivot" = 0 ] || die "--no-pivot only means anything for a profile; --image and --initramfs never pivot"
+    _k=; _i=; _dtb=; _what=
+
+    if [ -n "$image" ]; then
+        [ -r "$image" ] || die "cannot read $image"
+        command -v fdtget >/dev/null 2>&1 || die "no fdtget to read $image with"
+        _cfg=$(fit_config "$image"); [ -n "$_cfg" ] || die "$image names no configuration"
+        say "$image: $_cfg, $(fdtget -ts "$image" "/configurations/$_cfg" description 2>/dev/null)"
+        _kn=$(fit_image_of "$image" "$_cfg" kernel) || die "$_cfg names no kernel"
+        _rn=$(fit_image_of "$image" "$_cfg" ramdisk) || _rn=
+        _fn=$(fdtget -ts "$image" "/configurations/$_cfg" fdt 2>/dev/null | head -1) || _fn=
+
+        _k=$(mktemp /tmp/boot-profile.XXXXXX.kernel)
+        fit_extract "$image" "$_kn" "$_k"
+        [ -z "$_rn" ] || { _i=$(mktemp /tmp/boot-profile.XXXXXX.initrd); fit_extract "$image" "$_rn" "$_i"; }
+        if [ -n "$_fn" ]; then
+            _dtb=$(mktemp /tmp/boot-profile.XXXXXX.dtb)
+            fit_extract "$image" "$_fn" "$_dtb"
+            # A shipped device tree describes the board and not its RAM, exactly as a
+            # profile's does, so it needs the same node copied onto it.
+            graft_firmware_memory "$_dtb"
+        else
+            _dtb=/sys/firmware/fdt
+            say "$_cfg names no device tree; booting with the running one"
+        fi
+        _what=$image
+    else
+        [ -r "$initramfs" ] || die "cannot read $initramfs"
+        _i=$initramfs
+        _k=${kernel:-/boot/vmlinuz-$(uname -r)}
+        [ -r "$_k" ] || die "cannot read $_k; name one with --kernel"
+        # The running tree: it already carries the memory node and every overlay this
+        # boot applied, and swapping an initramfs changes none of that.
+        _dtb=/sys/firmware/fdt
+        _what=$initramfs
+    fi
+
+    _cl=${cmdline:-$(cat /proc/cmdline)}
+    say "kexec: kernel ${_k}${_i:+, initrd $_i}, dtb $_dtb"
+    say "kexec: command line: $_cl"
+    kexec_wait kexec --kexec-syscall --no-checks -l "$_k" ${_i:+--initrd="$_i"} \
+        --dtb="$_dtb" --command-line="$_cl" || die "kexec load failed"
+    # Loaded means read: the copies have served their purpose.
+    case "$_k" in /tmp/boot-profile.*) rm -f "$_k" ;; esac
+    case "$_i" in /tmp/boot-profile.*) rm -f "$_i" ;; esac
+    case "$_dtb" in /tmp/boot-profile.*) rm -f "$_dtb" ;; esac
+
+    if [ "$dry" = 1 ]; then
+        kexec --kexec-syscall -u 2>/dev/null || true
+        echo "boot-profile: $_what loaded OK and unloaded (dry run)"
+        exit 0
+    fi
+
+    # The profile path's handover drops its top-level mount and counts a boot attempt
+    # against the entry. There is no mount here and no entry to count against, so this
+    # is the same two ways over without either.
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        say "kexec into $_what, handing over with systemctl kexec"
+        exec systemctl kexec
+    fi
+    say "kexec into $_what, no systemd, jumping straight in"
+    sync
+    kexec -e || die "kexec -e refused, though the load succeeded"
+}
+
 if [ "$disarm" = 1 ]; then
     rm -f "$ARMED"
     if [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ]; then
@@ -87,18 +292,19 @@ fi
 
 [ "$arm" = 0 ] || [ "$dry" = 0 ] || die "--arm loads an image and --dry-run loads none"
 
+if [ -n "$image" ] && [ -n "$initramfs" ]; then
+    die "--image carries its own initramfs; --initramfs replaces one"
+fi
+if [ -n "$image" ] || [ -n "$initramfs" ]; then
+    boot_raw
+fi
+[ -z "$kernel" ] || die "--kernel only means anything with --initramfs"
+
 [ $# -ge 1 ] || { usage >&2; exit 1; }
 arg=$1
 case "$arg" in *..*|*/*) die "Invalid name: $arg" ;; esac
 
 need_root
-
-# To stderr for whoever ran it, to the kernel log for whoever reads the boot afterwards.
-say() {
-    echo "boot-profile: $*" >&2
-    [ -w /dev/kmsg ] && echo "boot-profile: $*" > /dev/kmsg 2>/dev/null
-    return 0
-}
 
 # BLS paths are top-level (/@X/...), so read them under a subvolid=5 mount.
 mount_top
@@ -442,38 +648,6 @@ else
     say "kexec into $arg rather than pivot: $PIVOT_WHY"
 fi
 
-# Copy this machine's /memory node onto the assembled device tree with libfdt (0.03s).
-#
-# A shipped dtb describes the board, not its RAM: U-Boot writes /memory at every cold
-# boot, and without it a kernel dies before it has a console. The node is copied, not
-# constructed, so the name and the banks stay firmware's. The reserve map is not copied:
-# it describes the running boot's initrd. A failure is a die, because the kernel this
-# would load hangs and says nothing.
-graft_firmware_memory() {
-    [ -r /sys/firmware/fdt ] || return 0
-    ! fdtget -l "$1" / 2>/dev/null | grep -qE '^memory(@|$)' || return 0
-    command -v fdtput >/dev/null 2>&1 && command -v fdtget >/dev/null 2>&1 \
-        || die "no fdtput to graft this machine's memory node with"
-    # reg is copied as raw cells, so the two trees have to agree on what a cell means.
-    for _c in '#address-cells' '#size-cells'; do
-        [ "$(fdtget -t u /sys/firmware/fdt / "$_c" 2>/dev/null)" = "$(fdtget -t u "$1" / "$_c" 2>/dev/null)" ] \
-            || die "the live and the assembled device tree disagree on $_c; no memory node can be copied"
-    done
-    _node=$(fdtget -l /sys/firmware/fdt / 2>/dev/null | grep -m1 '^memory') && [ -n "$_node" ] \
-        || die "the live device tree has no memory node to copy"
-    _reg=$(fdtget -t x /sys/firmware/fdt "/$_node" reg 2>/dev/null) && [ -n "$_reg" ] \
-        || die "the live memory node has no reg"
-    _dt=$(fdtget -ts /sys/firmware/fdt "/$_node" device_type 2>/dev/null) || _dt=memory
-    # shellcheck disable=SC2086
-    fdtput -c "$1" "/$_node" 2>/dev/null \
-        && fdtput -ts "$1" "/$_node" device_type "$_dt" 2>/dev/null \
-        && fdtput -t x "$1" "/$_node" reg $_reg 2>/dev/null \
-        || die "fdtput could not write the memory node into the assembled device tree"
-    # libfdt edits in place with no compile to catch a broken tree, so read it back.
-    [ "$(fdtget -t x "$1" "/$_node" reg 2>/dev/null)" = "$_reg" ] \
-        || die "the memory node written into the assembled device tree does not read back"
-    say "grafted this machine's memory node onto the profile's device tree"
-}
 
 # Only the kexec path needs these: a stock profile carries no kexec-tools and may still pivot.
 command -v kexec      >/dev/null 2>&1 || die "kexec not installed (kexec-tools), and $arg cannot be pivoted into: $PIVOT_WHY"

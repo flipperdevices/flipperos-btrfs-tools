@@ -1,0 +1,44 @@
+Validated 2026-09-10 in a disposable QEMU Linux VM.
+Python 3.12.14; Alpine 3.23.5; kernel 6.18.36-0-virt; btrfs-progs 6.17.1.
+
+test_cli_drift_exit_code_and_no_secret_output (test_credential_demo.CredentialTests.test_cli_drift_exit_code_and_no_secret_output) ... ok
+test_cli_failure_does_not_echo_input_secrets (test_credential_demo.CredentialTests.test_cli_failure_does_not_echo_input_secrets) ... ok
+test_default_is_read_only_and_detects_drift (test_credential_demo.CredentialTests.test_default_is_read_only_and_detects_drift) ... ok
+test_failed_fsync_before_replace_preserves_original (test_credential_demo.CredentialTests.test_failed_fsync_before_replace_preserves_original) ... ok
+test_failed_replace_preserves_original_and_removes_temp (test_credential_demo.CredentialTests.test_failed_replace_preserves_original_and_removes_temp) ... ok
+test_locked_owner_remains_locked (test_credential_demo.CredentialTests.test_locked_owner_remains_locked) ... ok
+test_preserves_shadow_owner_group_mode_and_xattrs (test_credential_demo.CredentialTests.test_preserves_shadow_owner_group_mode_and_xattrs) ... ok
+test_reapplies_after_password_rollback_even_with_stale_marker (test_credential_demo.CredentialTests.test_reapplies_after_password_rollback_even_with_stale_marker) ... ok
+test_refuses_boolean_version (test_credential_demo.CredentialTests.test_refuses_boolean_version) ... ok
+test_refuses_duplicate_account_name (test_credential_demo.CredentialTests.test_refuses_duplicate_account_name) ... ok
+test_refuses_empty_password (test_credential_demo.CredentialTests.test_refuses_empty_password) ... ok
+test_refuses_gid_mismatch (test_credential_demo.CredentialTests.test_refuses_gid_mismatch) ... ok
+test_refuses_hardlinked_shadow (test_credential_demo.CredentialTests.test_refuses_hardlinked_shadow) ... ok
+test_refuses_injected_record (test_credential_demo.CredentialTests.test_refuses_injected_record) ... ok
+test_refuses_malformed_shadow (test_credential_demo.CredentialTests.test_refuses_malformed_shadow) ... ok
+test_refuses_missing_lab_marker (test_credential_demo.CredentialTests.test_refuses_missing_lab_marker) ... ok
+test_refuses_missing_owner (test_credential_demo.CredentialTests.test_refuses_missing_owner) ... ok
+test_refuses_path_traversal (test_credential_demo.CredentialTests.test_refuses_path_traversal) ... ok
+test_refuses_symlink_profile (test_credential_demo.CredentialTests.test_refuses_symlink_profile) ... ok
+test_refuses_symlink_state (test_credential_demo.CredentialTests.test_refuses_symlink_state) ... ok
+test_refuses_uid_collision (test_credential_demo.CredentialTests.test_refuses_uid_collision) ... ok
+test_refuses_uid_mismatch (test_credential_demo.CredentialTests.test_refuses_uid_mismatch) ... ok
+test_refuses_unknown_state_version (test_credential_demo.CredentialTests.test_refuses_unknown_state_version) ... ok
+test_refuses_world_readable_state (test_credential_demo.CredentialTests.test_refuses_world_readable_state) ... ok
+test_repeated_apply_does_not_replace_file (test_credential_demo.CredentialTests.test_repeated_apply_does_not_replace_file) ... ok
+test_state_is_private (test_credential_demo.CredentialTests.test_state_is_private) ... ok
+test_syncs_password_aging_and_expiry (test_credential_demo.CredentialTests.test_syncs_password_aging_and_expiry) ... ok
+test_updates_only_owner_shadow_row (test_credential_demo.CredentialTests.test_updates_only_owner_shadow_row) ... ok
+----------------------------------------------------------------------
+Ran 28 tests in 0.561s
+OK
+PASS 1: changing Desktop password leaves Minimal accepting the stock password
+PASS 2: owner reconciliation rejects the old password and preserves service records
+PASS 3: clone of a configured profile is already current
+PASS 4: stock reset initially restores defaults; reconciliation repairs its writable copy
+PASS 5: old snapshot with an onboarding marker is reconciled to the latest shared state
+PASS 6: a real send/receive import gets local credentials in its writable profile
+PASS 7: read-only stock refuses mutation and retains its original content
+PASS 8: mismatched UID is refused before altering credentials
+PASS 9: shared home and per-profile machine-id files are unchanged; identity state survives profile rollback
+All 9 Btrfs scenarios passed.

@@ -171,6 +171,33 @@ fit_extract() {
     [ -s "$_out" ] || die "$_node came out of $_itb empty"
 }
 
+# An extracted FIT image, decompressed if its node says it is compressed.
+#
+# U-Boot undoes this itself, so a build is free to publish a compressed kernel, and the
+# Falcon FITs now do: their kernel node carries `compression = "zstd"`. kexec cannot,
+# and what it says about one is "Cannot determine the file type", so the bytes handed to
+# it have to be the real Image.
+fit_uncompress() {
+    _file=$1; _how=$2
+    case "$_how" in
+        ''|none) return 0 ;;
+        zstd) _tool=zstd ;;
+        gzip) _tool=gzip ;;
+        lzma) _tool=lzma ;;
+        lz4) _tool=lz4 ;;
+        bzip2) _tool=bzip2 ;;
+        *) die "$_file is compressed with $_how, which this cannot undo" ;;
+    esac
+    command -v "$_tool" >/dev/null 2>&1 || die "no $_tool to undo $_how with"
+    "$_tool" -dc "$_file" > "$_file.raw" 2>/dev/null || {
+        rm -f "$_file.raw"
+        die "cannot undo $_how on $_file"
+    }
+    [ -s "$_file.raw" ] || { rm -f "$_file.raw"; die "$_file came out of $_how empty"; }
+    mv -f "$_file.raw" "$_file" || die "cannot replace $_file with its uncompressed self"
+    say "undid $_how on $(basename "$_file")"
+}
+
 # The configuration for this board, chosen the way U-Boot chooses one: the first
 # compatible of a configuration against the first compatible of the running tree. A FIT
 # built for several board revisions carries one configuration each, and the wrong one
@@ -228,10 +255,13 @@ boot_raw() {
 
         _k=$(mktemp /tmp/boot-profile.XXXXXX.kernel)
         fit_extract "$image" "$_kn" "$_k"
+        fit_uncompress "$_k" "$(fdtget -ts "$image" "/images/$_kn" compression 2>/dev/null)"
         [ -z "$_rn" ] || { _i=$(mktemp /tmp/boot-profile.XXXXXX.initrd); fit_extract "$image" "$_rn" "$_i"; }
         if [ -n "$_fn" ]; then
             _dtb=$(mktemp /tmp/boot-profile.XXXXXX.dtb)
             fit_extract "$image" "$_fn" "$_dtb"
+            fit_uncompress "$_dtb" \
+                "$(fdtget -ts "$image" "/images/$_fn" compression 2>/dev/null)"
             # A shipped device tree describes the board and not its RAM, exactly as a
             # profile's does, so it needs the same node copied onto it.
             graft_firmware_memory "$_dtb"

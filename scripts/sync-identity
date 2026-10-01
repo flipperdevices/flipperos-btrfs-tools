@@ -1,0 +1,157 @@
+#!/bin/sh
+# sync-identity [--push] [-d|--device DEV]: make every profile present the same ssh host keys.
+#
+# Each profile is its own root with its own /etc/ssh, and the image ships no host keys, so every
+# root generates a set on its first boot and a client that trusted one profile is told the host key
+# changed on the next. The keys identify the device, not the profile, so one set is kept in a store
+# on the shared boot subvolume and copied into each root.
+#
+#   (no option)  the booted profile: take the store's keys, or seed the store from this profile's
+#                when the store has none. Run on every boot by flipper-sync-identity.service,
+#                after sshd-keygen and before ssh, so whichever profile boots first decides
+#   --push       every profile root on the filesystem now, without waiting for each to boot.
+#                For onboarding to call when it finishes. Exits 1 if a profile could not be written
+#
+# Copies, not links: migrate-profile, the snapshots and the keygen drop-in all read /etc/ssh itself,
+# and a link into a store that is not there leaves a root with no keys at all.
+#
+# A store with no ed25519 key counts as empty, and so does a key of zero length: that is what a
+# reset seconds after the write leaves behind. Nothing to do is a quiet success.
+set -eu
+
+STORE="${FLIPPER_IDENTITY_STORE:-/boot/flipper-identity}"
+SSH_DIR="${FLIPPER_SSH_DIR:-/etc/ssh}"
+PUSH=0
+
+usage() {
+    cat <<EOF
+Usage: sync-identity [--push] [-d|--device DEV]
+  --push      copy the device's ssh host keys into every profile now
+  -d,--device operate on btrfs filesystem DEV instead of the booted root (e.g. recovery); implies --push
+  With no option: give the booted profile the device's ssh host keys, or make this
+  profile's keys the device's if it has none yet.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --push)      PUSH=1 ;;
+        -d|--device) shift; [ $# -ge 1 ] || { echo "Error: --device needs an argument" >&2; usage >&2; exit 1; }
+                     ROOTDEV=$1; PUSH=1 ;;
+        --device=*)  ROOTDEV=${1#*=}; PUSH=1 ;;
+        -h|--help)   usage; exit 0 ;;
+        -?*)         echo "Error: unknown option: $1" >&2; usage >&2; exit 1 ;;
+        *)           usage >&2; exit 1 ;;
+    esac
+    shift
+done
+
+# True if directory $1 holds a usable key set.
+has_keys() { [ -s "$1/ssh_host_ed25519_key" ]; }
+
+# Copy key file $1 to $2 by way of a temporary name beside it, so a reset leaves the old key or the
+# new one and never half of either. Private keys are 0600 or sshd refuses them.
+put_key() {
+    _t="${2%/*}/.${2##*/}.sync.$$"
+    ( umask 077; cp "$1" "$_t" ) || { rm -f "$_t"; return 1; }
+    case "$2" in *.pub) _m=0644 ;; *) _m=0600 ;; esac
+    chmod "$_m" "$_t" && mv -f "$_t" "$2" || { rm -f "$_t"; return 1; }
+}
+
+# Give ssh directory $1 the store's keys. Prints how many files changed. Keys of a type the store
+# does not hold are left alone.
+install_keys() {
+    # A reset between the copy and the rename leaves a private key under a temporary name, which
+    # nothing else would ever remove and migrate-profile would carry as a user change.
+    rm -f "$1"/.ssh_host_*.sync.*
+    _n=0
+    for _k in "$STORE"/ssh/ssh_host_*; do
+        [ -s "$_k" ] || continue
+        cmp -s "$_k" "$1/${_k##*/}" && continue
+        put_key "$_k" "$1/${_k##*/}" || return 1
+        _n=$((_n + 1))
+    done
+    printf '%s' "$_n"
+}
+
+# Make ssh directory $1's keys the device's. Built aside and renamed into place: a store that
+# exists is a store that is complete.
+seed_store() {
+    ( umask 077; mkdir -p "$STORE" ) || return 1
+    # mkdir -p leaves a directory that was already there as it was.
+    chmod 0700 "$STORE"
+    rm -rf "$STORE"/ssh.new.*
+    _new="$STORE/ssh.new.$$"
+    ( umask 077; mkdir "$_new" ) || return 1
+    for _k in "$1"/ssh_host_*; do
+        [ -s "$_k" ] || continue
+        put_key "$_k" "$_new/${_k##*/}" || return 1
+    done
+    # The contents before the name: a rename that outlives its data is a store of empty keys.
+    sync
+    # The old set goes only once the new one is whole, so a reset leaves one or the other.
+    rm -rf "$STORE/ssh"
+    # -T: if another seed put an ssh/ back meanwhile, fail rather than move this set inside it.
+    mv -T "$_new" "$STORE/ssh" || { rm -rf "$_new"; return 1; }
+    sync
+}
+
+if [ "$PUSH" = 0 ]; then
+    [ -d "$SSH_DIR" ] && [ -w "$SSH_DIR" ] || { echo "sync-identity: $SSH_DIR is not writable, nothing to do"; exit 0; }
+    [ -d "${STORE%/*}" ] || { echo "sync-identity: ${STORE%/*} is not there, nothing to do"; exit 0; }
+    if has_keys "$STORE/ssh"; then
+        n=$(install_keys "$SSH_DIR")
+        if [ "$n" -gt 0 ]; then
+            sync
+            echo "sync-identity: $n ssh host key file(s) replaced with the device's"
+        fi
+    elif has_keys "$SSH_DIR"; then
+        [ -w "${STORE%/*}" ] || { echo "sync-identity: ${STORE%/*} is not writable, the device's keys stay unset"; exit 0; }
+        seed_store "$SSH_DIR"
+        echo "sync-identity: this profile's ssh host keys are now the device's"
+    else
+        echo "sync-identity: no ssh host keys here or in $STORE yet, nothing to do"
+    fi
+    exit 0
+fi
+
+[ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-btrfs.sh
+
+# FLIPPER_TOP names a directory standing in for the mounted top level, for the tests.
+if [ -n "${FLIPPER_TOP:-}" ]; then
+    TOP=$FLIPPER_TOP
+else
+    need_root
+    need_btrfs
+    mount_top
+    set_lock
+fi
+[ -n "${FLIPPER_IDENTITY_STORE:-}" ] || STORE="$TOP/boot/flipper-identity"
+
+if ! has_keys "$STORE/ssh"; then
+    # Under -d the booted root belongs to another filesystem and its keys to another device.
+    run=$(target_running_subvol)
+    [ -n "$run" ] && has_keys "$TOP/$run/etc/ssh" || die "No ssh host keys in the store yet and no booted profile to take them from; boot a profile once first"
+    seed_store "$TOP/$run/etc/ssh"
+    echo "Took the ssh host keys of '$run' as the device's"
+fi
+
+done_n=0; skipped=0; failed=0
+for d in "$TOP"/@*; do
+    [ -e "$d" ] || continue
+    rel=${d##*/}
+    is_reserved_subvol "$rel" && continue
+    # The roots create-profile moved aside; nothing boots them.
+    case "$rel" in *_old_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*|*.old_*) continue ;; esac
+    btrfs subvolume show "$d" >/dev/null 2>&1 || continue
+    [ -d "$d/etc/ssh" ] || continue
+    if is_ro "$d"; then echo "Skipped '$rel': read-only"; skipped=$((skipped + 1)); continue; fi
+    n=$(install_keys "$d/etc/ssh") || { echo "Warning: could not write the ssh host keys of '$rel'" >&2; failed=$((failed + 1)); continue; }
+    [ "$n" -gt 0 ] && echo "'$rel': $n ssh host key file(s) replaced with the device's"
+    done_n=$((done_n + n))
+done
+sync
+# Onboarding reads the status: 0 has to mean every profile it could reach now has the keys.
+[ "$failed" -eq 0 ] || die "$failed profile(s) kept ssh host keys of their own"
+[ "$done_n" -gt 0 ] || [ "$skipped" -gt 0 ] || echo "Every profile already has the device's ssh host keys"

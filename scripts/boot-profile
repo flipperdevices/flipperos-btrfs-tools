@@ -388,8 +388,8 @@ K="$TOP$K_REL"; I="$TOP$I_REL"
 # is refused and any other is checked for the same board. A profile the menu pivoted into
 # still runs that tree and is judged the same way. Otherwise the entry's tree is assembled
 # and compared with the live one as source, which is what catches an overlay changed since
-# the boot. Command lines are compared too, except under U-Boot's tree, where the running
-# one is the FIT's.
+# the boot. Command lines are compared too. Under U-Boot's tree the running one is the FIT's,
+# so only the arguments in BOOT_ONLY_ARGS are, which a pivot can never give a profile.
 PIVOT_HELPER=/usr/bin/boot-pivot
 PIVOT_REQ=/flipper-pivot
 
@@ -436,6 +436,30 @@ pivot_modules() {
 norm_args() {
     printf '%s\n' "$1" | tr ' \t' '\n\n' | grep -v '^$' \
         | grep -vE '^(root|rootflags|bootmenu|flipper\.entry)=' | sort | tr '\n' ' '
+}
+
+# Arguments only a kernel boot applies: what the kernel fixed when it started stays fixed
+# through a pivot, whoever's command line it started with.
+BOOT_ONLY_ARGS="mem"
+
+# The last value of argument $1 in command line $2, as the kernel takes it; empty when absent.
+arg_value() {
+    printf '%s\n' "$2" | tr ' \t' '\n\n' | sed -n "s/^$1=//p" | tail -n1
+}
+
+# How the entry and the running boot differ in BOOT_ONLY_ARGS, or nothing when they agree.
+boot_only_diff() {
+    _have_line=$(cat /proc/cmdline 2>/dev/null)
+    for _k in $BOOT_ONLY_ARGS; do
+        _want=$(arg_value "$_k" "$OPTS"); _have=$(arg_value "$_k" "$_have_line")
+        [ "$_want" = "$_have" ] && continue
+        if [ -n "$_want" ]; then
+            printf 'it asks for %s=%s and this boot did not get it' "$_k" "$_want"
+        else
+            printf 'this boot carries %s=%s and it never asked for it' "$_k" "$_have"
+        fi
+        return 0
+    done
 }
 
 # How the entry's command line differs from the running one, in either direction.
@@ -574,10 +598,14 @@ pivot_reason() {
     pivot_modules >/dev/null || { printf 'no modules for %s in %s' "$RUNNING" "$arg"; return 0; }
     pivot_init >/dev/null || { printf 'no init in %s' "$arg"; return 0; }
     _why=$(tree_reason); [ -z "$_why" ] || { printf '%s' "$_why"; return 0; }
-    # Under U-Boot's tree the command line is the FIT's, nobody's profile, so it is not compared.
-    [ "$PIVOT_HOW" = switch_root ] || live_tree_is_uboots || {
-        _why=$(cmdline_diff); [ -z "$_why" ] || { printf '%s' "$_why"; return 0; }
-    }
+    # Under U-Boot's tree the command line is the FIT's, nobody's profile, so only what a
+    # pivot cannot give is compared.
+    if [ "$PIVOT_HOW" = switch_root ] || live_tree_is_uboots; then
+        _why=$(boot_only_diff)
+    else
+        _why=$(cmdline_diff)
+    fi
+    [ -z "$_why" ] || { printf '%s' "$_why"; return 0; }
     return 0
 }
 

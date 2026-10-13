@@ -40,6 +40,7 @@ system reached multi-user, not that nothing failed on the way.
 | `migrate-profile` | carry a profile's changes onto a newer base |
 | `btrfs-maintenance`, `btrfs-show-space` | scrub, dedup, balance, usage |
 | `add-dtbo` | per-profile device-tree overlay drop-ins |
+| `create-swap` | the shared swap file in `@swap`, made when a profile first turns swap on |
 | `set-boot-order` | which profile boots by itself, and which kernel it boots |
 | `boot-profile` | boot an entry now, by kexec or by pivot |
 | `flipper-bless-boot` | run once per good boot, from the unit of the same name |

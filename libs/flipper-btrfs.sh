@@ -42,7 +42,7 @@ confirm() {
 # Subvolumes the tools must never write, delete or rename.
 is_reserved_subvol() {
     case "$1" in
-        @|@home|@root|@snapshots|@stock-snapshots|@var-log|@var-cache|boot) return 0 ;;
+        @|@home|@root|@snapshots|@stock-snapshots|@swap|@var-log|@var-cache|boot) return 0 ;;
         *) return 1 ;;
     esac
 }

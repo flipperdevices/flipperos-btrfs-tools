@@ -1,0 +1,59 @@
+#!/bin/sh
+# create-swap: the swap file every profile on a filesystem shares, made the first time one of
+# them turns swap on.
+#
+# One @swap subvolume at the top level, beside @home, holding one swapfile. Its own subvolume
+# because btrfs refuses to snapshot a subvolume holding an active swapfile, and profiles are
+# snapshotted. mkswapfile makes the file No_COW and uncompressed, which swap on btrfs needs.
+# Whether a profile swaps is its own fstab's business; nothing here touches a profile. Does
+# nothing when the file is already there.
+set -eu
+[ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-btrfs.sh
+
+SWAP_SIZE=8g
+SWAP_BYTES=8589934592
+# Left free after the file, so turning swap on cannot be what fills the filesystem.
+SWAP_MARGIN=1073741824
+
+usage() {
+    cat <<EOF
+Usage: create-swap [-d|--device DEV]
+$HELP_DEVICE
+  Create @swap and an $SWAP_SIZE swapfile in it, shared by every profile on the
+  filesystem. Nothing is done when the swapfile already exists.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -d|--device) shift; need_device_arg "$#"; ROOTDEV=$1 ;;
+        --device=*)  ROOTDEV=${1#*=} ;;
+        -h|--help)   usage; exit 0 ;;
+        -?*)         echo "Error: unknown option: $1" >&2; usage >&2; exit 1 ;;
+        *)           echo "Error: unexpected argument: $1" >&2; usage >&2; exit 1 ;;
+    esac
+    shift
+done
+
+need_root
+need_btrfs
+
+set_lock
+mount_top
+if [ -e "$TOP/@swap/swapfile" ]; then
+    echo "@swap/swapfile already exists"
+    exit 0
+fi
+if [ ! -d "$TOP/@swap" ]; then
+    btrfs subvolume create "$TOP/@swap" >/dev/null || die "Could not create @swap"
+    echo "Created @swap"
+fi
+_free=$(btrfs filesystem usage -b "$TOP" 2>/dev/null | awk '/Free \(estimated\)/ { print $3; exit }')
+[ -n "$_free" ] || die "Could not read the free space"
+[ "$_free" -ge $((SWAP_BYTES + SWAP_MARGIN)) ] \
+    || die "Not enough space for swap: $((SWAP_BYTES / 1073741824)) GiB needed, $((_free / 1073741824)) GiB free"
+# A file left half made would read as already there next time.
+btrfs filesystem mkswapfile --size "$SWAP_SIZE" "$TOP/@swap/swapfile" >/dev/null \
+    || { rm -f "$TOP/@swap/swapfile"; die "Could not create @swap/swapfile"; }
+echo "Created @swap/swapfile ($SWAP_SIZE)"

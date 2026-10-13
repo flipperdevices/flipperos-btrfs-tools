@@ -74,7 +74,7 @@ do_dedup() {
         echo "No @var-cache on this filesystem; keeping duperemove's hash db in $HASHFILE for this run only" >&2
     fi
     # -q: duperemove repaints a per-thread progress table, thousands of lines for a scan this size.
-    duperemove -dhrq --hashfile="$HASHFILE" --exclude="$HASHFILE*" "$TOP" || die "Duperemove failed (rc=$?)"
+    duperemove -dhrq --hashfile="$HASHFILE" --exclude="$HASHFILE*" --exclude="$TOP/@swap/*" "$TOP" || die "Duperemove failed (rc=$?)"
 }
 
 [ "$lock" = 1 ]     && set_lock

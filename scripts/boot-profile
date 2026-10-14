@@ -398,11 +398,35 @@ KREL=$(val version)
 [ -n "$KREL" ] || KREL=$(printf '%s' "$K_REL" | sed -n 's:.*/modules/\([^/]*\)/.*:\1:p')
 RUNNING=$(uname -r)
 
-# The entry's own devicetree, else the running board's dtb inside its devicetreedir.
+# The entry's own devicetree, else the running board's dtb inside its devicetreedir: of
+# the SoC's dtbs (the SoC is the last compatible), the ones whose first compatible is the
+# board's. A composite such as rk3576-evb1-v10-no-graphics.dtb is the board plus an
+# overlay, identical to it in compatible and named after it, so the shortest name is the
+# board. The reason on stdout when there is none.
 base_dtb() {
     if [ -n "$DT_REL" ]; then printf '%s' "$TOP$DT_REL"; return 0; fi
-    _comp=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
-    printf '%s' "$TOP$DTDIR_REL/rockchip/rk3576-$(printf '%s' "$_comp" | tr ',' '-').dtb"
+    _live=$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null); _live=${_live% }
+    _board=${_live%% *}; _soc=${_live##* }
+    [ "$_board" != "$_soc" ] || { printf 'the running device tree names no board'; return 1; }
+    command -v fdtget >/dev/null 2>&1 \
+        || { printf 'no fdtget to find the %s device tree with' "$_board"; return 1; }
+    _dir=$DTDIR_REL/${_soc%%,*}
+    set --
+    for _f in "$TOP$_dir/${_soc#*,}"-*.dtb; do
+        _c=$(fdtget -ts "$_f" / compatible 2>/dev/null)
+        [ "${_c%% *}" = "$_board" ] && set -- "$@" "$_f"
+    done
+    [ $# != 0 ] || { printf 'no device tree in %s is compatible with %s' "$_dir" "$_board"
+                     return 1; }
+    _pick=; _tie=
+    for _f; do
+        if [ -z "$_pick" ] || [ ${#_f} -lt ${#_pick} ]; then _pick=$_f; _tie=
+        elif [ ${#_f} = ${#_pick} ]; then _tie=$_f; fi
+    done
+    [ -z "$_tie" ] && { printf '%s' "$_pick"; return 0; }
+    printf '%s and %s in %s are both compatible with %s and neither name is shorter' \
+        "${_pick##*/}" "${_tie##*/}" "$_dir" "$_board"
+    return 1
 }
 
 # Which handover this machine can do, or nothing.
@@ -541,7 +565,7 @@ same_board() {
 # The entry's device tree into $1: base dtb plus its overlays. The reason on stdout when
 # it cannot be built.
 assemble_tree() {
-    _base=$(base_dtb)
+    _base=$(base_dtb) || { printf '%s' "$_base"; return 1; }
     [ -f "$_base" ] || { printf 'base device tree not found: %s' "${_base#$TOP}"; return 1; }
     # Overlays resolve labels against the base, which needs the symbol table of dtc -@.
     if [ -n "$OVL_REL" ] && command -v fdtget >/dev/null 2>&1; then
@@ -569,7 +593,7 @@ uboot_tree_reason() {
     [ -z "$OVL_REL" ] || {
         printf 'it wants overlays (%s) and the running device tree is the boot menu'"'"'s, with none' \
             "$(for _o in $OVL_REL; do printf '%s ' "${_o##*/}"; done)"; return 0; }
-    _base=$(base_dtb)
+    _base=$(base_dtb) || { printf '%s' "$_base"; return 0; }
     [ -f "$_base" ] || { printf 'no base device tree at %s' "${_base#$TOP}"; return 0; }
     _why=$(same_board "$_base") || printf '%s (%s)' "$_why" "${_base#$TOP}"
     return 0

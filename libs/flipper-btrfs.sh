@@ -259,6 +259,20 @@ stamp_stock_origin() {
     printf 'origin_stock_name=%s\n' "$2" > "$1/etc/profile_origin"
 }
 
+# Paths every running system writes for itself, identity and runtime state a new root makes
+# anew, as anchored regexes one per line: check-profile does not count them as a change, and
+# migrate-profile does not carry them as one (the identity among them it carries by policy).
+RUNTIME_STATE='^etc/(machine-id|machine-info|hostname|ld\.so\.cache|\.updated)$
+^etc/kernel/entry-token$
+^etc/ssh/(ssh_host_.*|welcome_banner)$
+^etc/avahi/services(/|$)
+^var/\.updated$
+^var/lib/dbus/machine-id$
+^var/lib/systemd/(random-seed|timers|timesync|rfkill|catalog|coredump|pstore)(/|$)
+^var/lib/(upower|NetworkManager)(/|$)
+^var/tmp(/|$)
+^tmp(/|$)'
+
 # A newline, to split the two-line output of one command run on two files.
 NL='
 '

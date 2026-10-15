@@ -239,10 +239,12 @@ btrfs receive --dump -f "$WORK/stream" >"$WORK/dump" 2>/dev/null \
 # Classify each op path: C=changed / D=deleted (in migrated scope), S=skipped (a real user change
 # outside scope, reported not carried), noise (package/shared/transient/identity/temp) is dropped.
 snapname=".migrate-src-$$"
-awk -v snap="$snapname" '
+RUNTIME_STATE="$RUNTIME_STATE" awk -v snap="$snapname" '
+BEGIN { nrt = split(ENVIRON["RUNTIME_STATE"], rt, "\n") }
 function strip(p,  s){ s="./" snap "/"; if (index(p,s)==1) return substr(p, length(s)+1); return "" }
 # Denylist: migrate everything the user changed EXCEPT known-useless paths. 1 = noise, 0 = migrate.
-function is_noise(p) {
+function is_noise(p,   i) {
+    for (i = 1; i <= nrt; i++) if (p ~ rt[i]) return 1
     # our own leftovers: an unresolved sidecar would otherwise count as a user change and be
     # carried into the next migration, and .migrate-bak is the resolv.conf we move aside for apt
     if (p ~ /\.migrate-(conflict|theirs|bak)$/) return 1
@@ -254,17 +256,11 @@ function is_noise(p) {
     if (p ~ /^usr\/share\/keyrings(\/|$)/) return 0
     if (p ~ /^usr(\/|$)/) return 1
     if (p ~ /^var\/lib\/(dpkg|apt|ucf)(\/|$)/) return 1
-    if (p=="var/.updated") return 1
-    if (p=="etc/machine-id"||p=="etc/machine-info"||p=="etc/hostname"||p=="etc/fstab"||p=="etc/os-release"||p=="etc/profile_origin"||p=="etc/ld.so.cache"||p=="etc/.updated"||p=="etc/resolv.conf") return 1
-    if (p ~ /^etc\/kernel\/(entry-token|cmdline)$/) return 1
-    if (p ~ /^etc\/ssh\/welcome_banner/) return 1
-    # the host keys are per-device now, so they land in the delta; carried by policy below instead
-    if (p ~ /^etc\/ssh\/ssh_host_/) return 1
-    if (p ~ /^etc\/avahi\/services(\/|$)/) return 1
+    if (p=="etc/fstab"||p=="etc/os-release"||p=="etc/profile_origin"||p=="etc/resolv.conf") return 1
+    if (p=="etc/kernel/cmdline") return 1
     if (p ~ /^etc\/ssl\/certs(\/|$)/) return 1
-    if (p=="var/lib/dbus/machine-id") return 1
-    if (p ~ /^var\/lib\/systemd\/(random-seed|timers|timesync|rfkill|catalog|coredump|pstore|deb-systemd(-user)?-helper-enabled)(\/|$)/) return 1
-    if (p ~ /^var\/lib\/(upower|NetworkManager|wtmpdb)(\/|$)/) return 1
+    if (p ~ /^var\/lib\/systemd\/deb-systemd(-user)?-helper-enabled(\/|$)/) return 1
+    if (p ~ /^var\/lib\/wtmpdb(\/|$)/) return 1
     if (p ~ /^var\/lib\/cog(\/|$)/) return 1
     return 0
 }

@@ -39,18 +39,14 @@ while [ $# -gt 0 ]; do
 done
 
 # Runtime state, not configuration: a new root regenerates it. Anchored regexes on the path.
-export CHECK_PROFILE_IGNORE='^etc/(machine-id|hostname|adjtime|\.updated|ld\.so\.cache|kernel/entry-token)$
-^etc/ssh/(ssh_host_.*|welcome_banner)$
-^etc/avahi/services(/|$)
-^var/\.updated$
-^var/lib/dbus/machine-id$
-^var/lib/systemd/(random-seed|catalog/database|timers|timesync|rfkill|backlight|pstore|coredump|linger)(/|$)
-^var/lib/(NetworkManager|bluetooth|alsa|upower|udisks2|samba|sddm|polkit-1|sudo|logrotate|AccountsService|ModemManager|power-profiles-daemon|colord|fwupd|plocate|private|iwd)(/|$)
+export CHECK_PROFILE_IGNORE="$RUNTIME_STATE"'
+^etc/adjtime$
+^var/lib/systemd/(backlight|linger)(/|$)
+^var/lib/(bluetooth|alsa|udisks2|samba|sddm|polkit-1|sudo|logrotate|AccountsService|ModemManager|power-profiles-daemon|colord|fwupd|plocate|private|iwd)(/|$)
 ^var/lib/apt/(lists|daily_lock|periodic)(/|$)
 ^var/lib/dpkg/(status-old|lock.*|triggers/Lock)$
 ^var/backups(/|$)
-^var/tmp(/|$)
-^(root|tmp)(/|$)'
+^root(/|$)'
 
 need_root
 need_btrfs

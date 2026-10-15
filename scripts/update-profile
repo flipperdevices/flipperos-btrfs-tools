@@ -376,6 +376,16 @@ restore_old() {
 progress 80 Switching
 rename_root "$PROFILE" "$keep" || die "Could not rename $PROFILE to $keep; nothing changed"
 with_bls "boot entry not written for $keep" flipper_write_entry "$keep" "$TOP/$keep" "$PROFILE"
+# The kept copy takes the profile's autoboot digit, so its entries sort right after the profile's
+# own and are what boots should the new one spend its tries.
+keep_auto() {
+    _d=$(profile_auto_digit "$PROFILE")
+    for _c in "$ENTRIES"/*.conf; do
+        [ -f "$_c" ] && [ "$(entry_subvol_of "$_c")" = "$keep" ] || continue
+        restamp_entry "$_c" "$_d" - - "$TOP/$keep"
+    done
+}
+with_bls "autoboot digit not set for $keep" keep_auto
 
 tool create-profile -y "@${kind}_${BUILD}_stock" "$PROFILE" || { restore_old; die "create-profile failed; $PROFILE is as it was"; }
 

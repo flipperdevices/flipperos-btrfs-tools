@@ -128,6 +128,23 @@ remove_entries() {
     return 0
 }
 
+# Remove the entries of $1 whose kernel is not in the root mounted at $2. An entry loads its
+# kernel from inside the root (/<subvol>/usr/lib/modules/<ver>/vmlinuz), so once the root is
+# replaced by one with another kernel the entry can never boot. Uses $ENTRIES.
+# $1 = subvol  $2 = mounted root
+remove_dead_entries() {
+    [ -n "$1" ] && [ -d "$2" ] || return 0
+    for _c in "${ENTRIES:-/boot/loader/entries}"/*.conf; do
+        [ -f "$_c" ] || continue
+        [ "$(entry_subvol_of "$_c")" = "$1" ] || continue
+        _lx="$(awk '$1=="linux"{print $2; exit}' "$_c")"
+        case "$_lx" in "/$1/"*) ;; *) continue ;; esac
+        [ -e "$2/${_lx#"/$1/"}" ] && continue
+        rm -f "$_c"; echo "removed boot entry $_c: its kernel is not in $1" >&2
+    done
+    return 0
+}
+
 # Remove every entry that selects $1, all versions, and each one's /boot/<token>/ staging
 # tree, derived from the entry's own 'linux' line. For delete-profile and rename-profile.
 # $1 = subvol
@@ -464,6 +481,7 @@ flipper_write_entry() {
     # re-created profile's snapshot depth moves the sort number, so a new entry would otherwise
     # land beside the old one.
     _ovl="$(clone_overlay_line "$BASE_OPTS rootflags=subvol=$_name" "$_origin" "$_snap")"
+    remove_dead_entries "$_name" "$_snap"
     emit_entry "$(printf '%s' "$_name" | tr -d '@')" "rootflags=subvol=$_name" "" "" "$_ovl"
     echo "flipper-bls: wrote entry for $_name (kernel $KERNEL_VERSION, token $ENTRY_TOKEN)"
 }

@@ -270,7 +270,7 @@ RUNTIME_STATE='^etc/(machine-id|machine-info|hostname|ld\.so\.cache|\.updated)$
 ^var/lib/dbus/machine-id$
 ^var/lib/systemd/(random-seed|timers|timesync|rfkill|catalog|coredump|pstore)(/|$)
 ^var/lib/(upower|NetworkManager)(/|$)
-^var/tmp(/|$)
+^var/(tmp|cache|log)(/|$)
 ^tmp(/|$)'
 
 # A newline, to split the two-line output of one command run on two files.

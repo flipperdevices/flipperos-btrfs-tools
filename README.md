@@ -38,7 +38,7 @@ system reached multi-user, not that nothing failed on the way.
 | `create-snapshot`, `delete-snapshot`, `list-snapshots` | restore points under `@snapshots` |
 | `send-snapshot`, `receive-snapshot` | zstd-compressed streams between devices |
 | `migrate-profile` | carry a profile's changes onto a newer base |
-| `check-profile` | whether a profile is still what its `_stock` shipped: pristine, config-modified or modified |
+| `check-profile` | how far a profile is from its `_stock`: pristine, booted, customized, packages or system |
 | `update-profile` | put a profile on a newer build's `_stock` from the artifact server, keeping its changes |
 | `btrfs-maintenance`, `btrfs-show-space` | scrub, dedup, balance, usage |
 | `add-dtbo` | per-profile device-tree overlay drop-ins |

@@ -1,10 +1,10 @@
 #!/bin/sh
 # update-profile <build> [<@profile>] - move a profile onto the _stock of a newer build, keeping
-# what the user changed. Only a profile check-profile calls pristine or config-modified is
-# updated, unless --force: a modified one (packages added or removed, files outside /etc) then has
-# the packages the user added or removed replayed with apt, which needs the network, and loses its
-# other changes under /usr, among them packages replaced by other versions. --force also takes a
-# build that is not newer than the profile's, to go back to an older one or reinstall its own.
+# what the user changed. A profile check-profile calls pristine, booted or customized is updated;
+# one whose packages or system files changed only with --force, which drops those changes: the new
+# build's packages and /usr are what it gets, and what an update carries goes over as always.
+# --force also takes a build that is not newer than the profile's, to go back to an older one or
+# reinstall its own.
 #
 # The build is looked up among the rootfs builds on the artifact server, its Minimal _stock
 # fetched in full and the profile's own as an increment over it, each checked against the build's
@@ -29,9 +29,9 @@
 # to say, asked separately so the two can run at once.
 # --progress adds "@progress <percent> <step>" lines to an update's output.
 #
-# Exit status: 0 updated (or already current), 2 not updated because the profile is modified
-# (without --force) or has unresolved migration conflicts, 3 rolled back because the migration
-# left conflicts, 1 error.
+# Exit status: 0 updated (or already current), 2 not updated because its packages or system
+# files changed (without --force) or it has unresolved migration conflicts, 3 rolled back
+# because the migration left conflicts, 1 error.
 #
 # Examples:
 #   update-profile 1201             # the booted profile
@@ -52,8 +52,8 @@ Usage: update-profile [-n|--dry-run] [-f|--force] [-d|--device DEV] <build> [<@p
        update-profile --list [--all] [-d|--device DEV] [<@profile>]
 $HELP_DEVICE
   -n,--dry-run say what would be fetched and done, change nothing
-  -f,--force   update a modified profile too, its changes under /usr lost, or to a build
-               that is not newer
+  -f,--force   update a profile whose packages or system files changed too, dropping
+               those changes, or to a build that is not newer
   --progress   also print "@progress <percent> <step>" lines
   --rollback   put the version kept by the last update back
   --list       the profile, the kept version and the builds it could move to
@@ -245,13 +245,10 @@ keep="$kept_head$cur"
 status=$(tool check-profile "$PROFILE") || die "check-profile failed on $PROFILE"
 echo "status: $status"
 case "$status" in
-    pristine|config-modified) ;;
-    modified)
-        [ "$FORCE" = 1 ] || { echo "$PROFILE is modified; --force updates it anyway, losing its changes under /usr" >&2; exit 2; }
-        # What migrate-profile never carries: /usr, but for /usr/local and the apt keyrings.
-        tool check-profile -v "$PROFILE" 2>&1 >/dev/null |
-            awk -F': ' '$2 ~ /^usr\// && $2 !~ /^usr\/(local|share\/keyrings)(\/|$)/ { n++; if (n <= 10) print "  " $0 }
-                END { if (n) printf "%d change(s) under /usr will not carry; packages added or removed are replayed with apt\n", n }' >&2 ;;
+    pristine|booted|customized) ;;
+    packages|system)
+        [ "$FORCE" = 1 ] || { echo "$PROFILE has its $status changed; --force updates it anyway, dropping those changes" >&2; exit 2; }
+        echo "forced: its $status changes are dropped" ;;
     *) die "check-profile says '$status' for $PROFILE" ;;
 esac
 # A sidecar is a change the last migration could not place; another migration would drop it.
@@ -391,7 +388,10 @@ tool create-profile -y "@${kind}_${BUILD}_stock" "$PROFILE" || { restore_old; di
 
 progress 85 "Carrying your changes"
 set +e
-tool migrate-profile -a -y --keep-identity "$keep" "$PROFILE"
+# Forced, the packages stay the new build's: nothing is replayed, and nothing needs the network.
+set -- -a -y --keep-identity
+[ "$FORCE" = 0 ] || set -- "$@" --no-packages
+tool migrate-profile "$@" "$keep" "$PROFILE"
 rc=$?
 set -e
 if [ "$rc" != 0 ]; then
@@ -404,9 +404,7 @@ drop_migrate_snapshots
 progress 95 Checking
 after=$(tool check-profile "$PROFILE") || after=error
 case "$after" in
-    pristine|config-modified) ;;
-    # Packages replayed onto the new base make it modified again.
-    modified) [ "$FORCE" = 1 ] || { restore_old; die "The updated $PROFILE checks out as modified against @${kind}_${BUILD}_stock; $PROFILE is as it was"; } ;;
+    pristine|booted|customized) ;;
     *) restore_old; die "The updated $PROFILE checks out as '$after' against @${kind}_${BUILD}_stock; $PROFILE is as it was" ;;
 esac
 

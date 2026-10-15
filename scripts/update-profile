@@ -13,7 +13,8 @@
 # which the user's changes and the device identity are carried (migrate-profile --keep-identity).
 # Should that leave a conflict, or the result not check out, the new one is dropped and the old one
 # gets its name back, so nothing changes. The new profile boots at the next reboot; the old one
-# stays bootable from the menu until deleted there or with delete-profile.
+# stays bootable from the menu until deleted there or with delete-profile. Stocks of builds
+# nothing is built from any more are deleted once an update has succeeded.
 #
 # The kept name sorts right after the profile's own, and the boot menu shows it as the profile's
 # name followed by "obsolete <build>", one of the user's to rename or delete.
@@ -326,6 +327,30 @@ for _f in $need; do
     _done=$((_done + ${_i%% *}))
 done
 
+# Stocks of the builds no profile or restore point is built from any more: nothing is reset to
+# them or migrated against them, so they only take space. A build still in use keeps every
+# stock it has, other kinds of profile among them, so one can be made from it again.
+prune_stocks() {
+    _used=" "
+    for _p in "$TOP"/@* "$TOP"/@snapshots/*; do
+        _o=$(sed -n 's/^origin_stock_name=//p' "$_p/etc/profile_origin" 2>/dev/null | head -n1)
+        _b=${_o%_stock}; _b=${_b##*_}
+        case "$_b" in ""|*[!0-9]*) continue ;; esac
+        _used="$_used$_b "
+    done
+    for _s in "$TOP"/@stock-snapshots/@*_stock; do
+        [ -e "$_s" ] || continue
+        _n=${_s##*/}; _b=${_n%_stock}; _b=${_b##*_}
+        case "$_b" in ""|*[!0-9]*) continue ;; esac
+        case "$_used" in *" $_b "*) continue ;; esac
+        if tool delete-snapshot -y "$_n" >/dev/null; then
+            echo "deleted $_n: nothing is built from build $_b any more"
+        else
+            echo "Warning: could not delete $_n" >&2
+        fi
+    done
+}
+
 # migrate-profile's own snapshot of the new profile, told apart from older ones by being new.
 snaps() { for _n in "$TOP/@snapshots/${PROFILE}"_*_before_migrate; do [ -e "$_n" ] && printf '%s\n' "${_n#"$TOP/"}"; done; return 0; }
 snaps_before=$(snaps)
@@ -375,6 +400,7 @@ case "$after" in
     *) restore_old; die "The updated $PROFILE checks out as '$after' against @${kind}_${BUILD}_stock; $PROFILE is as it was" ;;
 esac
 
+prune_stocks
 progress 100 Done
 echo
 echo "$PROFILE updated from build $cur to $BUILD ($after). Reboot into $PROFILE to use it."

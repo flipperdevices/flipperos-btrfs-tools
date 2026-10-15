@@ -1,0 +1,161 @@
+#!/bin/sh
+# check-profile - tell whether a profile is still what its _stock golden base shipped: prints
+# 'pristine', 'config-modified' (only /etc differs) or 'modified'. Diffs the profile against its
+# origin _stock (from /etc/profile_origin) with a metadata-only send, so an untouched profile costs
+# almost nothing. Rewrites that left a file as it was do not count, nor do the install's own edits
+# (the fs UUID in fstab and cmdline) or state every running system writes (machine-id, host keys,
+# timers, NetworkManager, ...).
+#
+# Example:
+#   check-profile              # the booted profile
+#   check-profile -v @Router   # and list what differs
+set -eu
+[ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+. /usr/lib/flipper-btrfs.sh
+
+usage() {
+    cat <<EOF
+Usage: check-profile [-v|--verbose] [-d|--device DEV] [<@profile>]
+$HELP_DEVICE
+  -v,--verbose list every path that differs from the _stock (on stderr)
+  Print 'pristine' if <@profile> (default: the booted one) matches its origin _stock,
+  'config-modified' if only /etc differs, else 'modified'.
+EOF
+}
+
+VERBOSE=0
+PROFILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -v|--verbose) VERBOSE=1 ;;
+        -d|--device)  shift; need_device_arg "$#"; ROOTDEV=$1 ;;
+        --device=*)   ROOTDEV=${1#*=} ;;
+        -h|--help)    usage; exit 0 ;;
+        -?*)          echo "Error: unknown option: $1" >&2; usage >&2; exit 1 ;;
+        *)            [ -z "$PROFILE" ] || { echo "Error: unexpected argument: $1" >&2; usage >&2; exit 1; }
+                      PROFILE=$1 ;;
+    esac
+    shift
+done
+
+# Runtime state, not configuration: a new root regenerates it. Anchored regexes on the path.
+export CHECK_PROFILE_IGNORE='^etc/(machine-id|hostname|adjtime|\.updated|ld\.so\.cache|kernel/entry-token)$
+^etc/ssh/(ssh_host_.*|welcome_banner)$
+^etc/avahi/services(/|$)
+^var/\.updated$
+^var/lib/dbus/machine-id$
+^var/lib/systemd/(random-seed|catalog/database|timers|timesync|rfkill|backlight|pstore|coredump|linger)(/|$)
+^var/lib/(NetworkManager|bluetooth|alsa|upower|udisks2|samba|sddm|polkit-1|sudo|logrotate|AccountsService|ModemManager|power-profiles-daemon|colord|fwupd|plocate|private|iwd)(/|$)
+^var/lib/apt/(lists|daily_lock|periodic)(/|$)
+^var/lib/dpkg/(status-old|lock.*|triggers/Lock)$
+^var/backups(/|$)
+^var/tmp(/|$)
+^(root|tmp)(/|$)'
+
+need_root
+need_btrfs
+need_cmd cmp diffutils
+
+failed=$(mktemp)
+TOP_TMPFILES="$failed"
+mount_top
+set_lock
+
+if [ -z "$PROFILE" ]; then
+    PROFILE=$(target_running_subvol)
+    [ -n "$PROFILE" ] || die "Not booted from $ROOTDEV: name the profile"
+fi
+validate_profile_name "$PROFILE"
+PROF="$TOP/$PROFILE"
+btrfs subvolume show "$PROF" >/dev/null 2>&1 || die "No such profile: $PROFILE"
+
+origin=$(sed -n 's/^origin_stock_name=//p' "$PROF/etc/profile_origin" 2>/dev/null | head -n1)
+[ -n "$origin" ] || die "$PROFILE has no origin _stock (/etc/profile_origin)"
+STOCK="$TOP/@stock-snapshots/$origin"
+btrfs subvolume show "$STOCK" >/dev/null 2>&1 || die "Origin _stock of $PROFILE is gone: $origin"
+is_ro "$STOCK" || die "Origin _stock is writable, so it is no reference: $origin"
+
+# The installer rewrites the fs UUID the stock was built with into these files.
+stock_uuid=$(awk '$2 == "/" { sub(/^UUID=/, "", $1); print $1; exit }' "$STOCK/etc/fstab" 2>/dev/null || true)
+dev_uuid=$(target_fsuuid)
+
+TAB=$(printf '\t')
+
+# Sets WHY to why path $1 differs between stock and profile, empty when it does not. In fstab
+# and cmdline the installer's fs UUID is put back to the stock's before calling it content.
+differs() {
+    path_differs "$STOCK" "$PROF" "$1"
+    [ "$WHY" = content ] && [ -n "$stock_uuid" ] && [ -n "$dev_uuid" ] || return 0
+    case "$1" in
+        etc/fstab|etc/kernel/cmdline)
+            sed "s/$stock_uuid/$dev_uuid/g" "$STOCK/$1" | cmp -s - "$PROF/$1" && WHY="" ;;
+    esac
+    return 0
+}
+
+# Any package installed, removed or upgraded shows here, without a diff.
+if [ "$VERBOSE" = 0 ]; then
+    differs var/lib/dpkg/status
+    [ -z "$WHY" ] || { echo modified; exit 0; }
+fi
+
+# Reads "<x|->TAB<path>" lines and prints the status. Only a change outside /etc settles it
+# early; an /etc one could still be followed by one.
+check_paths() {
+    _st=pristine
+    while IFS="$TAB" read -r _xa _path; do
+        differs "$_path"
+        # Any other difference also comes as a '-' line, which reports it
+        if [ "$_xa" = x ]; then
+            if [ -n "$WHY" ]; then WHY=""; else WHY=xattrs; fi
+        fi
+        [ -n "$WHY" ] || continue
+        case "$_path" in
+            etc/*) [ "$_st" = modified ] || _st=config-modified ;;
+            *)     _st=modified ;;
+        esac
+        if [ "$VERBOSE" = 1 ]; then printf '%s: %s\n' "$WHY" "$_path" >&2
+        elif [ "$_st" = modified ]; then break
+        fi
+    done
+    echo "$_st"
+}
+
+# A probe, because send needs a read-only source. Not '@'-named, so no tool lists it.
+probe=".check-profile.$$"
+trap 'btrfs subvolume delete "$TOP/$probe" >/dev/null 2>&1 || true; top_cleanup' EXIT
+btrfs subvolume snapshot -r "$PROF" "$TOP/$probe" >/dev/null || die "Cannot snapshot $PROFILE"
+
+# Each path the diff touches, once, as the stream goes, so the check can stop it early. An
+# 'x' line marks an xattr change, which cannot be compared here (no getfattr). Orphans
+# (o<ino>-<gen>-0) are send's temporary names, always renamed or unlinked later. Whitespace
+# in names comes escaped as '\ '.
+status=$({ btrfs send -q --no-data -p "$STOCK" "$TOP/$probe" || echo send >> "$failed"; } |
+    { btrfs receive --dump || echo receive >> "$failed"; } |
+    awk -v pre="./$probe/" '
+    BEGIN { n = split(ENVIRON["CHECK_PROFILE_IGNORE"], re, "\n"); sp = sprintf("%c", 1) }
+    function emit(p, x,   i, k) {
+        gsub(sp, " ", p)
+        if (index(p, pre) != 1) return
+        p = substr(p, length(pre) + 1)
+        if (p ~ /^o[0-9]+-[0-9]+-[0-9]+(\/|$)/) return
+        for (i = 1; i <= n; i++) if (p ~ re[i]) return
+        k = (x ? "x" : "-") "\t" p
+        if (k in seen) return
+        seen[k] = 1
+        print k
+        fflush()
+    }
+    {
+        gsub(/\\ /, sp)
+        op = $1
+        if (op == "snapshot" || op == "subvol" || op == "utimes" || op == "end") next
+        if (op == "rename") { d = $3; sub(/^dest=/, "", d); emit($2, 0); emit(d, 0); next }
+        emit($2, op == "set_xattr" || op == "remove_xattr")
+    }' | check_paths)
+
+# Stopping early cuts the stream, so send and receive fail then by design.
+if [ "$VERBOSE" = 1 ] || [ "$status" != modified ]; then
+    [ ! -s "$failed" ] || die "Diff against $origin failed in btrfs $(tr '\n' ' ' < "$failed")"
+fi
+echo "$status"

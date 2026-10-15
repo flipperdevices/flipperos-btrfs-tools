@@ -38,6 +38,7 @@ system reached multi-user, not that nothing failed on the way.
 | `create-snapshot`, `delete-snapshot`, `list-snapshots` | restore points under `@snapshots` |
 | `send-snapshot`, `receive-snapshot` | zstd-compressed streams between devices |
 | `migrate-profile` | carry a profile's changes onto a newer base |
+| `check-profile` | whether a profile is still what its `_stock` shipped: pristine, config-modified or modified |
 | `btrfs-maintenance`, `btrfs-show-space` | scrub, dedup, balance, usage |
 | `add-dtbo` | per-profile device-tree overlay drop-ins |
 | `create-swap` | the shared swap file in `@swap`, made when a profile first turns swap on |

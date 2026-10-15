@@ -1,5 +1,5 @@
 #!/bin/sh
-# migrate-profile [-a|--apply] [--force] [--keep-removed] [--keep-identity] [--show-noise] [--do-not-resolve] <@src> [<@dst>]
+# migrate-profile [-a|--apply] [--force] [--keep-removed] [--keep-identity] [--no-packages] [--show-noise] [--do-not-resolve] <@src> [<@dst>]
 # migrate-profile --resolve <@profile>
 #
 # Carry the changes a user made to profile <@src> onto profile <@dst> (typically a fresh profile
@@ -37,7 +37,7 @@ set -eu
 
 usage() {
     cat <<EOF
-Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--purge-removed] [--show-noise] [--do-not-resolve] <@src> [<@dst>|current]
+Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--purge-removed] [--keep-identity] [--no-packages] [--show-noise] [--do-not-resolve] <@src> [<@dst>|current]
        migrate-profile --resolve <@profile>
   Dry run by default; -a/--apply performs the migration (snapshots <@dst> first) and then
   resolves any remaining conflicts interactively.
@@ -45,6 +45,7 @@ Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--pu
   -d,--device DEV   operate on btrfs filesystem DEV instead of the booted root (e.g. recovery)
   --force           allow <@dst> to be the booted profile (modifies the live system)
   --keep-removed    keep packages the user removed (default: purge them on apply)
+  --no-packages     leave packages as dst has them: none added, none purged
   --keep-identity   also carry machine-id, machine-info, avahi services, NetworkManager and
                     rfkill state (an update of this device's profile, not a copy)
   -v, --verbose     list every affected file (default: show counts only)
@@ -54,7 +55,7 @@ Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--pu
 EOF
 }
 
-apply=0; resolve=0; force=0; purge_removed=1; show_noise=0; no_resolve=0; verbose=0; keep_identity=0
+apply=0; resolve=0; force=0; purge_removed=1; show_noise=0; no_resolve=0; verbose=0; keep_identity=0; no_packages=0
 while :; do
     case "${1:-}" in
         -a|--apply)        apply=1; shift ;;
@@ -63,6 +64,7 @@ while :; do
         --force)           force=1; shift ;;
         --keep-removed)    purge_removed=0; shift ;;
         --keep-identity)   keep_identity=1; shift ;;
+        --no-packages)     no_packages=1; shift ;;
         -v|--verbose)      verbose=1; shift ;;
         --show-noise)      show_noise=1; shift ;;
         --do-not-resolve)  no_resolve=1; shift ;;
@@ -353,6 +355,8 @@ manual_set "$base_rel" > "$WORK/pkg.base"
 manual_set "$src"  > "$WORK/pkg.src"
 added_pkgs=$(comm -13 "$WORK/pkg.base" "$WORK/pkg.src" | tr '\n' ' ')
 removed_pkgs=$(comm -23 "$WORK/pkg.base" "$WORK/pkg.src" | tr '\n' ' ')
+# An update that resets the packages: dst keeps the new base's, and nothing needs the network.
+if [ "$no_packages" = 1 ]; then added_pkgs=""; removed_pkgs=""; fi
 
 # --- 3-way merge helpers (base=ancestor, ours=dst, theirs=src) ---
 is_text() { grep -Iq . "$1" 2>/dev/null; }

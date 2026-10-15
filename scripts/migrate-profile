@@ -20,8 +20,8 @@
 # identity files (machine-id, ld.so.cache, and the like). SSH host keys are carried explicitly,
 # by policy rather than by delta, so the migrated profile keeps the device's ssh identity rather
 # than the keys its own first boot generated (no host-key-changed warnings). --keep-identity also
-# carries machine-id, machine-info, hostname, the avahi services and the NetworkManager and rfkill
-# state, for an update of the same device's profile.
+# carries machine-id, machine-info, the avahi services and the NetworkManager and rfkill state, for
+# an update of the same device's profile.
 #
 # A path counts as changed only if it differs from the ancestor in type, mode, owner, link target,
 # content or xattrs: send also reports access-time updates, and carrying those would copy src's
@@ -45,8 +45,8 @@ Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--pu
   -d,--device DEV   operate on btrfs filesystem DEV instead of the booted root (e.g. recovery)
   --force           allow <@dst> to be the booted profile (modifies the live system)
   --keep-removed    keep packages the user removed (default: purge them on apply)
-  --keep-identity   also carry machine-id, machine-info, hostname, avahi services, NetworkManager
-                    and rfkill state (an update of this device's profile, not a copy)
+  --keep-identity   also carry machine-id, machine-info, avahi services, NetworkManager and
+                    rfkill state (an update of this device's profile, not a copy)
   -v, --verbose     list every affected file (default: show counts only)
   --show-noise      list the paths skipped as noise (not just the count)
   --do-not-resolve  after --apply, leave conflicts as sidecars instead of resolving now
@@ -566,9 +566,10 @@ done < "$WORK/changed"
 # The ssh host keys ARE the device identity, so they follow the device, not the base. The image ships
 # none (each root generates its own on first boot), so the delta would report src's as a user change:
 # it drops them as noise and they are carried by policy here, whatever dst already has. With
-# --keep-identity machine-id, machine-info, hostname, the avahi services and the radio and
-# NetworkManager state go the same way; an unset machine-id is left alone. Prints the top-relative
-# paths dst lacks, so preview and apply agree on the count.
+# --keep-identity machine-id, machine-info, the avahi services and the radio and NetworkManager
+# state go the same way; an unset machine-id is left alone. The hostname stays the new base's, so
+# set-hostname-and-banner names the root again on its first boot and writes the banner for its
+# build. Prints the top-relative paths dst lacks, so preview and apply agree on the count.
 identity_files() {
     for _k in "$TOP/$src"/etc/ssh/ssh_host_*; do
         [ -f "$_k" ] || continue
@@ -577,7 +578,7 @@ identity_files() {
     done
     [ "$keep_identity" = 1 ] || return 0
     { [ "$(cat "$TOP/$src/etc/machine-id" 2>/dev/null)" = uninitialized ] || echo etc/machine-id
-      printf '%s\n' etc/machine-info etc/hostname var/lib/dbus/machine-id
+      printf '%s\n' etc/machine-info var/lib/dbus/machine-id
       for _d in var/lib/NetworkManager var/lib/systemd/rfkill etc/avahi/services; do
           [ -d "$TOP/$src/$_d" ] && (cd "$TOP/$src" && find "$_d" ! -type d)
       done; } | while IFS= read -r _k; do

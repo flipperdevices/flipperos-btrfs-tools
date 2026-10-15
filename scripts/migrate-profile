@@ -28,6 +28,7 @@
 # Default is a DRY RUN. -a/--apply performs it (snapshots <@dst> to @snapshots/<dst>_<ts>_before_
 # migrate first) and then, if any conflicts remain, drops straight into interactive resolution
 # unless --do-not-resolve is given. --resolve walks a profile's leftover conflict sidecars later.
+# Exits 3 when an apply leaves conflicts as sidecars (-y or --do-not-resolve).
 set -eu
 [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-btrfs.sh
@@ -748,3 +749,6 @@ echo
 echo "Migration applied to $dst. Reboot into it to verify."
 echo "To undo everything, restore the pre-migration snapshot:"
 echo "  sudo create-profile $snap $dst"
+if [ -s "$WORK/conflicts" ] && { [ "$no_resolve" = 1 ] || [ "$ASSUME_YES" = 1 ]; }; then
+    exit 3
+fi

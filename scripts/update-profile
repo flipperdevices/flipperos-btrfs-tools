@@ -307,14 +307,23 @@ for _f in $need; do
     mv "$CACHE/$_f.part" "$CACHE/$_f"
     _got=$((_got + ${_i%% *}))
 done
-_nf=0
-for _f in $need; do _nf=$((_nf + 1)); done
-_k=0
+# Each stream goes in through a descriptor of ours, which the receive shares, so how far it has
+# read is that descriptor's position, and /proc says what it is.
+_done=0
 for _f in $need; do
-    progress $((70 + _k * 10 / _nf)) Receiving
-    tool receive-snapshot "$CACHE/$_f" || die "Receive failed: $_f (kept in $CACHE)"
+    _i=$(file_info "$_f")
+    exec 7<"$CACHE/$_f"
+    tool receive-snapshot - <&7 &
+    _rp=$!
+    while kill -0 "$_rp" 2>/dev/null; do
+        _pos=$(awk '$1 == "pos:" { print $2 }' "/proc/$$/fdinfo/7" 2>/dev/null)
+        progress $((70 + (_done + ${_pos:-0}) * 10 / bytes)) Receiving
+        sleep 1
+    done
+    wait "$_rp" || { exec 7<&-; die "Receive failed: $_f (kept in $CACHE)"; }
+    exec 7<&-
     rm -f "$CACHE/$_f"
-    _k=$((_k + 1))
+    _done=$((_done + ${_i%% *}))
 done
 
 # migrate-profile's own snapshot of the new profile, told apart from older ones by being new.

@@ -39,6 +39,7 @@ system reached multi-user, not that nothing failed on the way.
 | `send-snapshot`, `receive-snapshot` | zstd-compressed streams between devices |
 | `migrate-profile` | carry a profile's changes onto a newer base |
 | `check-profile` | whether a profile is still what its `_stock` shipped: pristine, config-modified or modified |
+| `update-profile` | put a profile on a newer build's `_stock` from the artifact server, keeping its changes |
 | `btrfs-maintenance`, `btrfs-show-space` | scrub, dedup, balance, usage |
 | `add-dtbo` | per-profile device-tree overlay drop-ins |
 | `create-swap` | the shared swap file in `@swap`, made when a profile first turns swap on |
@@ -124,5 +125,6 @@ look like an account database, `migrate-profile` keeps the target's copy and lea
 ## Runtime dependencies
 
 `btrfs-progs` throughout; `zstd` for the snapshot streams; `rsync`, `git` and `mergiraf` for
-`migrate-profile`'s three-way merges; `duperemove` 0.13 or newer for `btrfs-maintenance dedup`, which
-deduplicates read-only subvolumes and needs a version that opens a dedup target read-only.
+`migrate-profile`'s three-way merges; `curl`, `jq` and `sha256sum` for `update-profile`'s downloads;
+`duperemove` 0.13 or newer for `btrfs-maintenance dedup`, which deduplicates read-only subvolumes
+and needs a version that opens a dedup target read-only.

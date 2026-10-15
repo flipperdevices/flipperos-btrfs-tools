@@ -1,5 +1,5 @@
 #!/bin/sh
-# migrate-profile [-a|--apply] [--force] [--keep-removed] [--show-noise] [--do-not-resolve] <@src> [<@dst>]
+# migrate-profile [-a|--apply] [--force] [--keep-removed] [--keep-identity] [--show-noise] [--do-not-resolve] <@src> [<@dst>]
 # migrate-profile --resolve <@profile>
 #
 # Carry the changes a user made to profile <@src> onto profile <@dst> (typically a fresh profile
@@ -19,7 +19,9 @@
 # files (replayed via apt instead), caches, regenerated runtime state, and generated/per-device
 # identity files (machine-id, ld.so.cache, and the like). SSH host keys are carried explicitly,
 # by policy rather than by delta, so the migrated profile keeps the device's ssh identity rather
-# than the keys its own first boot generated (no host-key-changed warnings).
+# than the keys its own first boot generated (no host-key-changed warnings). --keep-identity also
+# carries machine-id, machine-info, hostname, the avahi services and the NetworkManager and rfkill
+# state, for an update of the same device's profile.
 #
 # A path counts as changed only if it differs from the ancestor in type, mode, owner, link target,
 # content or xattrs: send also reports access-time updates, and carrying those would copy src's
@@ -43,6 +45,8 @@ Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--pu
   -d,--device DEV   operate on btrfs filesystem DEV instead of the booted root (e.g. recovery)
   --force           allow <@dst> to be the booted profile (modifies the live system)
   --keep-removed    keep packages the user removed (default: purge them on apply)
+  --keep-identity   also carry machine-id, machine-info, hostname, avahi services, NetworkManager
+                    and rfkill state (an update of this device's profile, not a copy)
   -v, --verbose     list every affected file (default: show counts only)
   --show-noise      list the paths skipped as noise (not just the count)
   --do-not-resolve  after --apply, leave conflicts as sidecars instead of resolving now
@@ -50,7 +54,7 @@ Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--pu
 EOF
 }
 
-apply=0; resolve=0; force=0; purge_removed=1; show_noise=0; no_resolve=0; verbose=0
+apply=0; resolve=0; force=0; purge_removed=1; show_noise=0; no_resolve=0; verbose=0; keep_identity=0
 while :; do
     case "${1:-}" in
         -a|--apply)        apply=1; shift ;;
@@ -58,6 +62,7 @@ while :; do
         --resolve)         resolve=1; shift ;;
         --force)           force=1; shift ;;
         --keep-removed)    purge_removed=0; shift ;;
+        --keep-identity)   keep_identity=1; shift ;;
         -v|--verbose)      verbose=1; shift ;;
         --show-noise)      show_noise=1; shift ;;
         --do-not-resolve)  no_resolve=1; shift ;;
@@ -564,14 +569,24 @@ done < "$WORK/changed"
 
 # The ssh host keys ARE the device identity, so they follow the device, not the base. The image ships
 # none (each root generates its own on first boot), so the delta would report src's as a user change:
-# it drops them as noise and they are carried by policy here, whatever dst already has. Prints the
-# files dst lacks, so preview and apply agree on the count.
-ssh_identity_files() {
-    [ -d "$TOP/$src/etc/ssh" ] || return 0
+# it drops them as noise and they are carried by policy here, whatever dst already has. With
+# --keep-identity machine-id, machine-info, hostname, the avahi services and the radio and
+# NetworkManager state go the same way; an unset machine-id is left alone. Prints the top-relative
+# paths dst lacks, so preview and apply agree on the count.
+identity_files() {
     for _k in "$TOP/$src"/etc/ssh/ssh_host_*; do
         [ -f "$_k" ] || continue
         cmp -s "$_k" "$TOP/$dst/etc/ssh/${_k##*/}" && continue
-        printf '%s\n' "$_k"
+        printf '%s\n' "${_k#"$TOP/$src/"}"
+    done
+    [ "$keep_identity" = 1 ] || return 0
+    { [ "$(cat "$TOP/$src/etc/machine-id" 2>/dev/null)" = uninitialized ] || echo etc/machine-id
+      printf '%s\n' etc/machine-info etc/hostname var/lib/dbus/machine-id
+      for _d in var/lib/NetworkManager var/lib/systemd/rfkill etc/avahi/services; do
+          [ -d "$TOP/$src/$_d" ] && (cd "$TOP/$src" && find "$_d" ! -type d)
+      done; } | while IFS= read -r _k; do
+        path_differs "$TOP/$dst" "$TOP/$src" "$_k"
+        case "$WHY" in ""|removed|"gone from both") ;; *) printf '%s\n' "$_k" ;; esac
     done
 }
 
@@ -585,8 +600,8 @@ echo
 echo "== migration preview: $src -> $dst =="
 printf '  packages:  +%s added   -%s removed\n' "$_na" "$_nr"
 printf '  files:     %s carried   %s changed by both sides   %s deleted   %s skipped as noise\n' "$_nc" "$_no" "$_nd" "$_noise"
-_nid=$(ssh_identity_files | wc -l | tr -d ' ')
-[ "${_nid:-0}" -gt 0 ] && printf '  identity:  %s ssh host key file(s), carried so %s keeps this device identity\n' "$_nid" "$dst"
+_nid=$(identity_files | wc -l | tr -d ' ')
+[ "${_nid:-0}" -gt 0 ] && printf '  identity:  %s file(s), carried so %s keeps this device identity\n' "$_nid" "$dst"
 echo
 echo "  Carried, deleted and account databases apply automatically. The $_no changed-by-both"
 echo "  file(s) are 3-way merged on apply; only those that cannot merge cleanly will ask you to"
@@ -699,14 +714,15 @@ if [ -s "$WORK/deleted" ]; then
     while IFS= read -r f; do [ -n "$f" ] && delete_one "$f"; done < "$WORK/deleted.rev"
 fi
 
-# Carry the ssh host keys, listed by ssh_identity_files above.
+# Carry the identity files, listed by identity_files above.
 _idn=0; _idfail=0
-for _k in $(ssh_identity_files); do
-    if rsync -aHAX "$_k" "$TOP/$dst/etc/ssh/${_k##*/}"; then _idn=$((_idn+1))
-    else _idfail=$((_idfail+1)); echo "Warning: could not carry ${_k##*/}" >&2; fi
+for _k in $(identity_files); do
+    mkdir -p "$(dirname "$TOP/$dst/$_k")"
+    if rsync -aHAX "$TOP/$src/$_k" "$TOP/$dst/$_k"; then _idn=$((_idn+1))
+    else _idfail=$((_idfail+1)); echo "Warning: could not carry /$_k" >&2; fi
 done
-[ "$_idn" -gt 0 ] && echo "carried $_idn ssh host key file(s), so '$dst' keeps this device's identity"
-[ "$_idfail" -gt 0 ] && echo "WARNING: $_idfail ssh host key file(s) could not be carried; '$dst' will present a different ssh identity and clients will report a changed host key" >&2
+[ "$_idn" -gt 0 ] && echo "carried $_idn identity file(s), so '$dst' keeps this device's identity"
+[ "$_idfail" -gt 0 ] && echo "WARNING: $_idfail identity file(s) could not be carried; '$dst' will present a different identity (a changed ssh host key, a new machine-id)" >&2
 
 # The databases are merged one at a time, so beyond the malformed accounts finalize_accountdbs
 # drops from all of them, nothing guarantees they still agree: a passwd entry with no shadow entry

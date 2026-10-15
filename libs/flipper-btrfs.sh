@@ -258,3 +258,30 @@ with_bls() {
 stamp_stock_origin() {
     printf 'origin_stock_name=%s\n' "$2" > "$1/etc/profile_origin"
 }
+
+# A newline, to split the two-line output of one command run on two files.
+NL='
+'
+
+# Sets WHY to how path $3 differs between roots $1 and $2, empty when it does not: added, removed,
+# "type or mode", "link target" or content. Owner counts, timestamps and xattrs do not. One stat
+# for both and no subshell of its own: a profile can have thousands of paths to check.
+path_differs() {
+    WHY=""
+    _pd1="$1/$3"; _pd2="$2/$3"
+    if [ ! -e "$_pd1" ] && [ ! -L "$_pd1" ]; then
+        if [ -e "$_pd2" ] || [ -L "$_pd2" ]; then WHY=added; else WHY="gone from both"; fi
+        return 0
+    fi
+    if [ ! -e "$_pd2" ] && [ ! -L "$_pd2" ]; then WHY=removed; return 0; fi
+    _pdm=$(stat -c '%F %a %u %g' -- "$_pd1" "$_pd2")
+    if [ "${_pdm%%"$NL"*}" != "${_pdm#*"$NL"}" ]; then WHY="type or mode"; return 0; fi
+    case "$_pdm" in
+        "symbolic link "*)
+            _pdm=$(readlink -- "$_pd1" "$_pd2")
+            [ "${_pdm%%"$NL"*}" = "${_pdm#*"$NL"}" ] || WHY="link target" ;;
+        "regular "*)
+            cmp -s "$_pd1" "$_pd2" || WHY=content ;;
+    esac
+    return 0
+}

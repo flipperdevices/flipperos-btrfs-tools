@@ -112,7 +112,8 @@ tool() {
 }
 
 manifest=$(mktemp)
-TOP_TMPFILES="$manifest"
+migrc=$(mktemp)
+TOP_TMPFILES="$manifest $migrc"
 ROOTDEV=$DEV
 mount_top
 
@@ -283,8 +284,8 @@ fi
 progress() { [ "$PROGRESS" = 0 ] || printf '@progress %s %s\n' "$1" "$2"; }
 
 # The download is most of the wait, so it has most of the bar: 0 to 70 by bytes, then 70 to 80
-# receiving, and the steps after it the rest. Everything is fetched before anything is received,
-# so a failed download leaves nothing half received.
+# receiving, 85 to 95 migrate-profile's own steps, and the steps after it the rest. Everything is
+# fetched before anything is received, so a failed download leaves nothing half received.
 mkdir -p "$CACHE"
 _got=0
 for _f in $need; do
@@ -294,7 +295,7 @@ for _f in $need; do
     _cp=$!
     while kill -0 "$_cp" 2>/dev/null; do
         _sz=$(stat -c %s "$CACHE/$_f.part" 2>/dev/null || echo 0)
-        progress $(((_got + _sz) * 70 / bytes)) Downloading
+        progress $(((_got + _sz) * 70 / bytes)) "Downloading images"
         sleep 1
     done
     wait "$_cp" || die "Download failed: $_f"
@@ -315,7 +316,7 @@ for _f in $need; do
     _rp=$!
     while kill -0 "$_rp" 2>/dev/null; do
         _pos=$(awk '$1 == "pos:" { print $2 }' "/proc/$$/fdinfo/7" 2>/dev/null)
-        progress $((70 + (_done + ${_pos:-0}) * 10 / bytes)) Receiving
+        progress $((70 + (_done + ${_pos:-0}) * 10 / bytes)) "Writing images"
         sleep 1
     done
     wait "$_rp" || { exec 7<&-; die "Receive failed: $_f (kept in $CACHE)"; }
@@ -370,7 +371,7 @@ restore_old() {
 
 # The current version moves out of the way first, under its own name and with its own entry, so
 # it is never a leftover anything cleans up, and it keeps its identity.
-progress 80 Switching
+progress 80 "Switching profiles"
 rename_root "$PROFILE" "$keep" || die "Could not rename $PROFILE to $keep; nothing changed"
 with_bls "boot entry not written for $keep" flipper_write_entry "$keep" "$TOP/$keep" "$PROFILE"
 # The kept copy takes the profile's autoboot digit, so its entries sort right after the profile's
@@ -386,13 +387,18 @@ with_bls "autoboot digit not set for $keep" keep_auto
 
 tool create-profile -y "@${kind}_${BUILD}_stock" "$PROFILE" || { restore_old; die "create-profile failed; $PROFILE is as it was"; }
 
-progress 85 "Carrying your changes"
 set +e
 # Forced, the packages stay the new build's: nothing is replayed, and nothing needs the network.
-set -- -a -y --keep-identity
+set -- -a -y --keep-identity --progress
 [ "$FORCE" = 0 ] || set -- "$@" --no-packages
-tool migrate-profile "$@" "$keep" "$PROFILE"
-rc=$?
+# Its steps take 85 to 95 of the bar. The pipe would lose its exit status, so it is kept aside.
+{ tool migrate-profile "$@" "$keep" "$PROFILE"; echo $? > "$migrc"; } | while IFS= read -r _l; do
+    case "$_l" in
+        "@progress "*) _p=${_l#@progress }; progress $((85 + ${_p%% *} / 10)) "${_p#* }" ;;
+        *) printf '%s\n' "$_l" ;;
+    esac
+done
+rc=$(cat "$migrc")
 set -e
 if [ "$rc" != 0 ]; then
     restore_old

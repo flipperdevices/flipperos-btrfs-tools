@@ -1,5 +1,5 @@
 #!/bin/sh
-# migrate-profile [-a|--apply] [--force] [--keep-removed] [--keep-identity] [--no-packages] [--show-noise] [--do-not-resolve] <@src> [<@dst>]
+# migrate-profile [-a|--apply] [--force] [--keep-removed] [--keep-identity] [--no-packages] [--progress] [--show-noise] [--do-not-resolve] <@src> [<@dst>]
 # migrate-profile --resolve <@profile>
 #
 # Carry the changes a user made to profile <@src> onto profile <@dst> (typically a fresh profile
@@ -30,14 +30,15 @@
 # Default is a DRY RUN. -a/--apply performs it (snapshots <@dst> to @snapshots/<dst>_<ts>_before_
 # migrate first) and then, if any conflicts remain, drops straight into interactive resolution
 # unless --do-not-resolve is given. --resolve walks a profile's leftover conflict sidecars later.
-# Exits 3 when an apply leaves conflicts as sidecars (-y or --do-not-resolve).
+# Exits 3 when an apply leaves conflicts as sidecars (-y or --do-not-resolve). --progress adds
+# "@progress <percent> <step>" lines to the output.
 set -eu
 [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
 . /usr/lib/flipper-btrfs.sh
 
 usage() {
     cat <<EOF
-Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--purge-removed] [--keep-identity] [--no-packages] [--show-noise] [--do-not-resolve] <@src> [<@dst>|current]
+Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--purge-removed] [--keep-identity] [--no-packages] [--progress] [--show-noise] [--do-not-resolve] <@src> [<@dst>|current]
        migrate-profile --resolve <@profile>
   Dry run by default; -a/--apply performs the migration (snapshots <@dst> first) and then
   resolves any remaining conflicts interactively.
@@ -48,6 +49,7 @@ Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--pu
   --no-packages     leave packages as dst has them: none added, none purged
   --keep-identity   also carry machine-id, machine-info, avahi services, NetworkManager and
                     rfkill state (an update of this device's profile, not a copy)
+  --progress        also print "@progress <percent> <step>" lines
   -v, --verbose     list every affected file (default: show counts only)
   --show-noise      list the paths skipped as noise (not just the count)
   --do-not-resolve  after --apply, leave conflicts as sidecars instead of resolving now
@@ -55,7 +57,7 @@ Usage: migrate-profile [-a|--apply] [-y|--yes] [-d|--device DEV] [--force] [--pu
 EOF
 }
 
-apply=0; resolve=0; force=0; purge_removed=1; show_noise=0; no_resolve=0; verbose=0; keep_identity=0; no_packages=0
+apply=0; resolve=0; force=0; purge_removed=1; show_noise=0; no_resolve=0; verbose=0; keep_identity=0; no_packages=0; show_progress=0
 while :; do
     case "${1:-}" in
         -a|--apply)        apply=1; shift ;;
@@ -65,6 +67,7 @@ while :; do
         --keep-removed)    purge_removed=0; shift ;;
         --keep-identity)   keep_identity=1; shift ;;
         --no-packages)     no_packages=1; shift ;;
+        --progress)        show_progress=1; shift ;;
         -v|--verbose)      verbose=1; shift ;;
         --show-noise)      show_noise=1; shift ;;
         --do-not-resolve)  no_resolve=1; shift ;;
@@ -227,6 +230,11 @@ echo "  merge engine: $merger"
 [ "$apply" = 1 ] && echo "  mode: APPLY" || echo "  mode: dry run"
 
 set_lock
+
+# $1 = percent, $2 = the step under way
+progress() { [ "$show_progress" = 0 ] || printf '@progress %s %s\n' "$1" "$2"; }
+
+progress 0 "Finding your changes"
 
 # --- authoritative delta ancestor -> src via btrfs send --no-data ---
 SRCSNAP="$TOP/@snapshots/.migrate-src-$$"
@@ -650,6 +658,7 @@ fi
 # Replay package intent FIRST (lays down package files + default conffiles), so the user's
 #    config edits merge on top of them afterwards. Needs a working apt source / network.
 if [ -n "$added_pkgs" ] || { [ "$purge_removed" = 1 ] && [ -n "$removed_pkgs" ]; }; then
+    progress 20 "Restoring your packages"
     echo "replaying packages with apt (needs network; this can take a few minutes)..."
     for _m in proc sys dev dev/pts; do mount --bind "/$_m" "$TOP/$dst/$_m" 2>/dev/null || true; done
     # DNS for apt: dst's /etc/resolv.conf is usually a systemd symlink into /run (absent here), so
@@ -700,13 +709,16 @@ fi
 # 3-way merge the rest of the user's changed files onto dst
 _total=$(cnt "$WORK/changed.rest")
 echo "merging your files onto $dst ($_total, via $merger)..."
-_n=0
+progress 50 "Merging your files"
+_n=0; _pct=50
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     _n=$((_n+1)); printf '\r  merging %d/%d' "$_n" "$_total" >&2
+    [ $((50 + _n * 40 / _total)) = "$_pct" ] || { _pct=$((50 + _n * 40 / _total)); progress "$_pct" "Merging your files"; }
     merge_one "$f"
 done < "$WORK/changed.rest"
 [ "$_n" -gt 0 ] && printf '\r  merged %d/%d files \n' "$_n" "$_total" >&2
+progress 90 Finishing
 
 # Apply the user's deletions, deepest-first (files before their dir) so empty dirs can rmdir
 if [ -s "$WORK/deleted" ]; then

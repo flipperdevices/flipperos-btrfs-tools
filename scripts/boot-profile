@@ -140,6 +140,114 @@ graft_firmware_memory() {
     say "grafted this machine's memory node onto the profile's device tree"
 }
 
+# SPL's m2_straps, row for row (board/flipper/flipper-one/flipper-one-rk3576.c in U-Boot's
+# rk3576 branch), indexed by the M.2 key B straps with CONFIG_0 in bit 0. The host pulls
+# all four up, so a module reads as the pins it grounds and an empty slot as 0xf. pcie0
+# and sata0 share combphy0, so at most one of them is on.
+M2_PCIE=/soc/pcie@22000000
+M2_SATA=/soc/sata@2a240000
+M2_PCIE_ON="$M2_PCIE=okay $M2_SATA=disabled"
+M2_SATA_ON="$M2_PCIE=disabled $M2_SATA=okay"
+M2_BOTH_OFF="$M2_PCIE=disabled $M2_SATA=disabled"
+m2_strap() {
+    case $1 in
+        0)  echo "SATA SSD|$M2_SATA_ON" ;;
+        1)  echo "WWAN, SSIC cfg 0|$M2_BOTH_OFF" ;;
+        2)  echo "PCIe SSD|$M2_PCIE_ON" ;;
+        3)  echo "WWAN, SSIC cfg 1|$M2_BOTH_OFF" ;;
+        4)  echo "WWAN, PCIe cfg 0|$M2_PCIE_ON" ;;
+        5)  echo "WWAN, SSIC cfg 2|$M2_BOTH_OFF" ;;
+        6)  echo "WWAN, PCIe cfg 1|$M2_PCIE_ON" ;;
+        7)  echo "WWAN, SSIC cfg 3|$M2_BOTH_OFF" ;;
+        8)  echo "WWAN, PCIe + USB3 cfg 0|$M2_PCIE_ON" ;;
+        9)  echo "WWAN, PCIe cfg 2|$M2_PCIE_ON" ;;
+        10) echo "WWAN, PCIe + USB3 cfg 1|$M2_PCIE_ON" ;;
+        11) echo "WWAN, PCIe cfg 3|$M2_PCIE_ON" ;;
+        12) echo "WWAN, PCIe + USB3 cfg 2|$M2_PCIE_ON" ;;
+        13) echo "WWAN, PCIe + USB3, vendor|$M2_PCIE_ON" ;;
+        14) echo "WWAN, PCIe + USB3 cfg 3|$M2_PCIE_ON" ;;
+        15) echo "empty|$M2_BOTH_OFF" ;;
+    esac
+}
+
+# The straps as SPL reads them: m2-config-gpios in order, entry n as bit n. The
+# descriptor comes from $1, else from the live tree, and each bank is found by its
+# address, since gpiochip numbers follow probe order (gpio3 is gpiochip4). The value on
+# stdout, or the reason and status 1.
+m2_read() {
+    _m2t=$1
+    fdtget "$_m2t" /m2-slot m2-config-gpios >/dev/null 2>&1 || _m2t=/sys/firmware/fdt
+    [ -r "$_m2t" ] || { printf 'no /m2-slot in the device tree, and the live one cannot be read'; return 1; }
+    _m2c=$(fdtget -t x "$_m2t" /m2-slot m2-config-gpios 2>/dev/null) \
+        || { printf 'no /m2-slot in either device tree'; return 1; }
+    command -v gpioget >/dev/null 2>&1 || { printf 'no gpioget to read the straps with'; return 1; }
+    _m2banks=
+    for _m2n in $(fdtget -l "$_m2t" /pinctrl 2>/dev/null); do
+        case "$_m2n" in gpio@*) ;; *) continue ;; esac
+        _m2p=$(fdtget -t x "$_m2t" "/pinctrl/$_m2n" phandle 2>/dev/null) || continue
+        _m2banks="$_m2banks $((0x$_m2p)):${_m2n#gpio@}"
+    done
+    _m2v=0; _m2bit=0
+    # shellcheck disable=SC2086
+    set -- $_m2c
+    while [ $# -gt 0 ]; do
+        _m2addr=
+        for _m2b in $_m2banks; do
+            [ "${_m2b%%:*}" = "$((0x$1))" ] && _m2addr=${_m2b#*:}
+        done
+        [ -n "$_m2addr" ] \
+            || { printf 'CONFIG_%s names phandle 0x%s, which is no GPIO bank' "$_m2bit" "$1"; return 1; }
+        _m2cells=$(fdtget -t u "$_m2t" "/pinctrl/gpio@$_m2addr" '#gpio-cells' 2>/dev/null) || _m2cells=
+        [ "$_m2cells" = 2 ] \
+            || { printf 'gpio@%s has #gpio-cells %s, and only 2 is understood' "$_m2addr" "$_m2cells"; return 1; }
+        [ $# -ge 3 ] || { printf 'm2-config-gpios ends inside an entry'; return 1; }
+        _m2chip=
+        for _m2d in /sys/bus/platform/devices/"$_m2addr".gpio/gpiochip*; do
+            [ -e "$_m2d" ] && _m2chip=${_m2d##*/}
+        done
+        [ -n "$_m2chip" ] || { printf 'no gpiochip for gpio@%s' "$_m2addr"; return 1; }
+        _m2pin=$(gpioget --numeric -c "$_m2chip" "$((0x$2))" 2>/dev/null) || _m2pin=
+        case "$_m2pin" in
+            0|1) ;;
+            *) printf 'cannot read CONFIG_%s (%s line %s)' "$_m2bit" "$_m2chip" "$((0x$2))"; return 1 ;;
+        esac
+        # GPIO_ACTIVE_LOW is bit 0 of the flags cell.
+        [ $((0x$3 & 1)) = 0 ] || _m2pin=$((1 - _m2pin))
+        _m2v=$((_m2v | _m2pin << _m2bit)); _m2bit=$((_m2bit + 1))
+        shift 3
+    done
+    [ "$_m2bit" = 4 ] || { printf 'm2-config-gpios lists %s pins, not 4' "$_m2bit"; return 1; }
+    printf '%s' "$_m2v"
+}
+
+# Switch the M.2 slot's controllers in $1 to what the module in it says it is.
+#
+# SPL does this to the tree it hands Linux, and a tree assembled from an entry still has
+# the dtb's defaults, so it is done again here. The pins are read rather than taken from
+# the live tree, which after a kexec is this tool's own. Edited through a copy, so a
+# failure leaves $1 untouched. Never fails the boot: a wrong slot can be put right after
+# the boot, a boot that never happens cannot.
+m2_straps() {
+    command -v fdtput >/dev/null 2>&1 \
+        || { say "M.2: no fdtput, so the slot is left as the device tree has it"; return 0; }
+    _m2v=$(m2_read "$1") || { say "M.2: $_m2v; the slot is left as the device tree has it"; return 0; }
+    _m2row=$(m2_strap "$_m2v")
+    _m2what="CONFIG 0x$(printf '%x' "$_m2v"): ${_m2row%%|*}"
+    for _m2s in ${_m2row#*|}; do
+        fdtget -p "$1" "${_m2s%=*}" >/dev/null 2>&1 \
+            || { say "M.2: $_m2what, but the device tree has no ${_m2s%=*}; the slot is left as it is"; return 0; }
+    done
+    cp "$1" "$1.m2" 2>/dev/null || { say "M.2: $_m2what, but the device tree cannot be copied to edit"; return 0; }
+    for _m2s in ${_m2row#*|}; do
+        fdtput -ts "$1.m2" "${_m2s%=*}" status "${_m2s#*=}" 2>/dev/null \
+            && [ "$(fdtget -ts "$1.m2" "${_m2s%=*}" status 2>/dev/null)" = "${_m2s#*=}" ] \
+            || { rm -f "$1.m2"; say "M.2: $_m2what, but ${_m2s%=*} would not take status ${_m2s#*=}; the slot is left as it is"; return 0; }
+    done
+    mv -f "$1.m2" "$1" 2>/dev/null \
+        || { rm -f "$1.m2"; say "M.2: $_m2what, but the edited device tree cannot replace the assembled one"; return 0; }
+    say "M.2: $_m2what"
+}
+
 # Where a FIT keeps an image's bytes when mkimage was given -E.
 #
 # The tree then holds only data-offset and data-size, and the bytes sit after the tree
@@ -268,6 +376,7 @@ boot_raw() {
             # A shipped device tree describes the board and not its RAM, exactly as a
             # profile's does, so it needs the same node copied onto it.
             graft_firmware_memory "$_dtb"
+            m2_straps "$_dtb"
         else
             _dtb=/sys/firmware/fdt
             say "$_cfg names no device tree; booting with the running one"
@@ -565,8 +674,8 @@ same_board() {
     return 0
 }
 
-# The entry's device tree into $1: base dtb plus its overlays. The reason on stdout when
-# it cannot be built.
+# The entry's device tree into $1: base dtb plus its overlays, then the M.2 slot as its
+# straps say. The reason on stdout when it cannot be built.
 assemble_tree() {
     _base=$(base_dtb) || { printf '%s' "$_base"; return 1; }
     [ -f "$_base" ] || { printf 'base device tree not found: %s' "${_base#"$TOP"}"; return 1; }
@@ -579,10 +688,14 @@ assemble_tree() {
     _ovl=""; _novl=0
     for _o in $OVL_REL; do _ovl="$_ovl $TOP$_o"; _novl=$((_novl + 1)); done
     say "device tree: assembling ${_base#"$TOP"} plus $_novl overlay(s)"
-    [ -n "$_ovl" ] || { cp "$_base" "$1"; return 0; }
-    # shellcheck disable=SC2086
-    _err=$(fdtoverlay -i "$_base" -o "$1" $_ovl 2>&1) \
-        || { printf 'fdtoverlay failed: %s' "$(printf '%s' "$_err" | tr '\n' ' ')"; return 1; }
+    if [ -n "$_ovl" ]; then
+        # shellcheck disable=SC2086
+        _err=$(fdtoverlay -i "$_base" -o "$1" $_ovl 2>&1) \
+            || { printf 'fdtoverlay failed: %s' "$(printf '%s' "$_err" | tr '\n' ' ')"; return 1; }
+    else
+        cp "$_base" "$1"
+    fi
+    m2_straps "$1"
     return 0
 }
 

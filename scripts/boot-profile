@@ -15,10 +15,13 @@
 # --dry-run decides and validates without handing over. --no-pivot forces kexec.
 # --arm loads the kexec image and stops, so a later boot hands over at once; loading is
 # 2.4s of a 13.8s kexec boot and can happen while the menu is idle. --disarm discards it.
+# shellcheck source-path=SCRIPTDIR
 set -eu
 [ -r /usr/lib/flipper-btrfs.sh ] || { echo "Error: /usr/lib/flipper-btrfs.sh not found" >&2; exit 1; }
+# shellcheck source=../libs/flipper-btrfs.sh
 . /usr/lib/flipper-btrfs.sh
 [ -r /usr/lib/flipper-blsname.sh ] || { echo "Error: /usr/lib/flipper-blsname.sh not found" >&2; exit 1; }
+# shellcheck source=../libs/flipper-blsname.sh
 . /usr/lib/flipper-blsname.sh
 
 usage() {
@@ -114,7 +117,7 @@ say() {
 graft_firmware_memory() {
     [ -r /sys/firmware/fdt ] || return 0
     ! fdtget -l "$1" / 2>/dev/null | grep -qE '^memory(@|$)' || return 0
-    command -v fdtput >/dev/null 2>&1 && command -v fdtget >/dev/null 2>&1 \
+    { command -v fdtput >/dev/null 2>&1 && command -v fdtget >/dev/null 2>&1; } \
         || die "no fdtput to graft this machine's memory node with"
     # reg is copied as raw cells, so the two trees have to agree on what a cell means.
     for _c in '#address-cells' '#size-cells'; do
@@ -127,9 +130,9 @@ graft_firmware_memory() {
         || die "the live memory node has no reg"
     _dt=$(fdtget -ts /sys/firmware/fdt "/$_node" device_type 2>/dev/null) || _dt=memory
     # shellcheck disable=SC2086
-    fdtput -c "$1" "/$_node" 2>/dev/null \
+    { fdtput -c "$1" "/$_node" 2>/dev/null \
         && fdtput -ts "$1" "/$_node" device_type "$_dt" 2>/dev/null \
-        && fdtput -t x "$1" "/$_node" reg $_reg 2>/dev/null \
+        && fdtput -t x "$1" "/$_node" reg $_reg 2>/dev/null; } \
         || die "fdtput could not write the memory node into the assembled device tree"
     # libfdt edits in place with no compile to catch a broken tree, so read it back.
     [ "$(fdtget -t x "$1" "/$_node" reg 2>/dev/null)" = "$_reg" ] \
@@ -458,7 +461,7 @@ pivot_modules() {
 # A command line without what a pivot sets itself (the root) or what belongs to the
 # menu image, sorted for comparing.
 norm_args() {
-    printf '%s\n' "$1" | tr ' \t' '\n\n' | grep -v '^$' \
+    printf '%s\n' "$1" | tr '\t' ' ' | tr ' ' '\n' | grep -v '^$' \
         | grep -vE '^(root|rootflags|bootmenu|flipper\.entry)=' | sort | tr '\n' ' '
 }
 
@@ -468,7 +471,7 @@ BOOT_ONLY_ARGS="mem"
 
 # The last value of argument $1 in command line $2, as the kernel takes it; empty when absent.
 arg_value() {
-    printf '%s\n' "$2" | tr ' \t' '\n\n' | sed -n "s/^$1=//p" | tail -n1
+    printf '%s\n' "$2" | tr '\t' ' ' | tr ' ' '\n' | sed -n "s/^$1=//p" | tail -n1
 }
 
 # How the entry and the running boot differ in BOOT_ONLY_ARGS, or nothing when they agree.
@@ -495,10 +498,10 @@ cmdline_diff() {
     for _a in $_want; do case " $_have " in *" $_a "*) ;; *) _miss="$_miss $_a" ;; esac; done
     for _a in $_have; do case " $_want " in *" $_a "*) ;; *) _extra="$_extra $_a" ;; esac; done
     [ -z "$_miss" ]  || printf 'it asks for%s and this boot did not get %s' \
-        "$_miss" "$([ "$(echo $_miss | wc -w)" = 1 ] && echo it || echo them)"
+        "$_miss" "$([ "$(echo "$_miss" | wc -w)" = 1 ] && echo it || echo them)"
     [ -n "$_miss" ] && [ -n "$_extra" ] && printf '; '
     [ -z "$_extra" ] || printf 'this boot carries%s and it never asked for %s' \
-        "$_extra" "$([ "$(echo $_extra | wc -w)" = 1 ] && echo it || echo them)"
+        "$_extra" "$([ "$(echo "$_extra" | wc -w)" = 1 ] && echo it || echo them)"
 }
 
 # A device tree source without what the loader writes per boot: /memory, /chosen,
@@ -566,16 +569,16 @@ same_board() {
 # it cannot be built.
 assemble_tree() {
     _base=$(base_dtb) || { printf '%s' "$_base"; return 1; }
-    [ -f "$_base" ] || { printf 'base device tree not found: %s' "${_base#$TOP}"; return 1; }
+    [ -f "$_base" ] || { printf 'base device tree not found: %s' "${_base#"$TOP"}"; return 1; }
     # Overlays resolve labels against the base, which needs the symbol table of dtc -@.
     if [ -n "$OVL_REL" ] && command -v fdtget >/dev/null 2>&1; then
         fdtget -l "$_base" / 2>/dev/null | grep -qx '__symbols__' \
-            || { printf '%s has no symbol table (dtc -@); no overlay can apply' "${_base#$TOP}"
+            || { printf '%s has no symbol table (dtc -@); no overlay can apply' "${_base#"$TOP"}"
                  return 1; }
     fi
-    say "device tree: assembling ${_base#$TOP} plus $(set -- $OVL_REL; echo $#) overlay(s)"
-    _ovl=""
-    for _o in $OVL_REL; do _ovl="$_ovl $TOP$_o"; done
+    _ovl=""; _novl=0
+    for _o in $OVL_REL; do _ovl="$_ovl $TOP$_o"; _novl=$((_novl + 1)); done
+    say "device tree: assembling ${_base#"$TOP"} plus $_novl overlay(s)"
     [ -n "$_ovl" ] || { cp "$_base" "$1"; return 0; }
     # shellcheck disable=SC2086
     _err=$(fdtoverlay -i "$_base" -o "$1" $_ovl 2>&1) \
@@ -594,8 +597,8 @@ uboot_tree_reason() {
         printf 'it wants overlays (%s) and the running device tree is the boot menu'"'"'s, with none' \
             "$(for _o in $OVL_REL; do printf '%s ' "${_o##*/}"; done)"; return 0; }
     _base=$(base_dtb) || { printf '%s' "$_base"; return 0; }
-    [ -f "$_base" ] || { printf 'no base device tree at %s' "${_base#$TOP}"; return 0; }
-    _why=$(same_board "$_base") || printf '%s (%s)' "$_why" "${_base#$TOP}"
+    [ -f "$_base" ] || { printf 'no base device tree at %s' "${_base#"$TOP"}"; return 0; }
+    _why=$(same_board "$_base") || printf '%s (%s)' "$_why" "${_base#"$TOP"}"
     return 0
 }
 
@@ -740,9 +743,10 @@ armed_for() {
     [ -r "$ARMED" ] || return 1
     [ "$(cat /sys/kernel/kexec_loaded 2>/dev/null)" = 1 ] || return 1
     A_PROFILE=; A_DEV=; A_ENTRY=; A_KREL=; A_OPTS=; A_KERNEL=; A_INITRD=
+    # shellcheck source=/dev/null
     . "$ARMED"
     # Paths without the mount point: every run mounts the top level somewhere new.
-    [ "$A_PROFILE" = "$1" ] && [ "$A_DEV" = "$ROOTDEV" ] && [ "$A_ENTRY" = "${entry#$TOP}" ] \
+    [ "$A_PROFILE" = "$1" ] && [ "$A_DEV" = "$ROOTDEV" ] && [ "$A_ENTRY" = "${entry#"$TOP"}" ] \
         && [ "$A_KREL" = "$KREL" ] && [ "$A_OPTS" = "$OPTS" ] \
         && [ "$A_KERNEL" = "$K_REL" ] && [ "$A_INITRD" = "$I_REL" ]
 }
@@ -770,7 +774,7 @@ else
 
     if [ "$arm" = 1 ]; then
         printf "A_PROFILE='%s'\nA_DEV='%s'\nA_ENTRY='%s'\nA_KREL='%s'\nA_OPTS='%s'\n" \
-            "$arg" "$ROOTDEV" "${entry#$TOP}" "$KREL" "$OPTS" > "$ARMED" \
+            "$arg" "$ROOTDEV" "${entry#"$TOP"}" "$KREL" "$OPTS" > "$ARMED" \
             || die "cannot write $ARMED"
         printf "A_KERNEL='%s'\nA_INITRD='%s'\n" "$K_REL" "$I_REL" >> "$ARMED"
         say "armed $arg: its image is loaded and a boot of it now hands over straight away"
@@ -801,7 +805,7 @@ trap - EXIT INT TERM HUP
 
 # Other tools' top-level mounts too, lazily where a reader holds one: the disks go
 # offline under a mounted filesystem otherwise.
-for _m in $(awk '$3 == "btrfs" { print $2 }' /proc/self/mounts | sort -r); do
+awk '$3 == "btrfs" { print $2 }' /proc/self/mounts | sort -r | while read -r _m; do
     umount "$_m" 2>/dev/null || umount -l "$_m" 2>/dev/null || true
 done
 

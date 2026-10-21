@@ -92,6 +92,15 @@ echo "alpha rsa private" > "$d/B/.ssh_host_rsa_key.sync.4242"
 run "$d/boot/flipper-identity" "$d/B" >/dev/null
 ck "stray temp cleared" "$(ls -A "$d/B" | grep -c '\.sync\.')" "0"
 
+# --- a key that cannot be copied leaves the profile as it was, not half replaced ---
+if [ "$(id -u)" != 0 ]; then
+    mkkeys "$d/E" echo; chmod 000 "$d/boot/flipper-identity/ssh/ssh_host_rsa_key.pub"
+    run "$d/boot/flipper-identity" "$d/E" >/dev/null 2>&1; ck "failed copy exit" "$?" "1"
+    ck "failed copy, keys kept" "$(cat "$d/E/ssh_host_ed25519_key")" "echo ed25519 private"
+    ck "failed copy, no temp" "$(ls -A "$d/E" | grep -c '\.sync\.')" "0"
+    chmod 644 "$d/boot/flipper-identity/ssh/ssh_host_rsa_key.pub"
+fi
+
 # --- a zero-length key is no key: it neither seeds a store nor counts as one ---
 d="$W/empty"; mkdir -p "$d/boot"; mkkeys "$d/A" alpha; : > "$d/A/ssh_host_ed25519_key"
 out=$(run "$d/boot/flipper-identity" "$d/A"); rc=$?
@@ -176,6 +185,47 @@ printf '#!/bin/sh\nexit 1\n' > "$W/bin/findmnt"; chmod +x "$W/bin/findmnt"
 FLIPPER_TOP="$T" sh "$W/sync-identity" --push >/dev/null 2>&1; ck "push empty store exit" "$?" "1"
 ck "push empty store, no seed" "$([ -e "$T/boot/flipper-identity" ] && echo made || echo none)" "none"
 ck "push empty store, keys kept" "$(cat "$T/@Desktop/etc/ssh/ssh_host_ed25519_key")" "delta ed25519 private"
+
+# --- --reseed: new keys for the device, in the store and every profile ---
+# Stands in for ssh-keygen -A -f DIR, which writes under DIR/etc/ssh and exits 0 even when it
+# could not write a key, saying so on stderr. KEYGEN set to fail writes nothing, to partial only
+# ed25519 and a complaint, to nopub every key but without the ed25519 public half.
+cat > "$W/bin/ssh-keygen" <<'EOF'
+#!/bin/sh
+for t in rsa ecdsa ed25519; do
+    case "${KEYGEN:-}:$t" in
+        fail:*|partial:rsa|partial:ecdsa) echo "Could not save your private key in $3" >&2; continue ;;
+    esac
+    echo "fresh $t private" > "$3/etc/ssh/ssh_host_${t}_key"
+    [ "${KEYGEN:-}:$t" = nopub:ed25519 ] || echo "fresh $t public" > "$3/etc/ssh/ssh_host_${t}_key.pub"
+done
+EOF
+chmod +x "$W/bin/ssh-keygen"
+T="$W/top3"; mkkeys "$T/boot/flipper-identity/ssh" alpha
+mkkeys "$T/@Desktop/etc/ssh" alpha
+mkkeys "$T/@Locked/etc/ssh" alpha
+for k in fail partial nopub; do
+    KEYGEN=$k FLIPPER_TOP="$T" sh "$W/sync-identity" --reseed >/dev/null 2>&1; ck "reseed keygen $k exit" "$?" "1"
+    ck "reseed keygen $k, store kept" "$(cat "$T/boot/flipper-identity/ssh/ssh_host_ed25519_key")" "alpha ed25519 private"
+    ck "reseed keygen $k, profile kept" "$(cat "$T/@Desktop/etc/ssh/ssh_host_rsa_key")" "alpha rsa private"
+done
+out=$(KEYGEN=partial FLIPPER_TOP="$T" sh "$W/sync-identity" --reseed 2>&1)
+ck "reseed keygen error shown" "$(printf '%s\n' "$out" | grep -q "Could not save your private key" && echo yes)" "yes"
+out=$(FLIPPER_TOP="$T" sh "$W/sync-identity" --reseed 2>&1); rc=$?
+ck "reseed exit"        "$rc" "0"
+ck "reseed store"       "$(cat "$T/boot/flipper-identity/ssh/ssh_host_ed25519_key")" "fresh ed25519 private"
+ck "reseed store mode"  "$(mode "$T/boot/flipper-identity/ssh/ssh_host_rsa_key")" "600"
+# The old set traded places with the new one, then went.
+ck "reseed store clean" "$(ls -A "$T/boot/flipper-identity")" "ssh"
+ck "reseed profile"     "$(cat "$T/@Desktop/etc/ssh/ssh_host_rsa_key")" "fresh rsa private"
+ck "reseed skips read-only" "$(cat "$T/@Locked/etc/ssh/ssh_host_ed25519_key")" "alpha ed25519 private"
+ck "reseed restart last" "$(printf '%s\n' "$out" | tail -n 1 | grep -c "restart ssh")" "1"
+out=$(FLIPPER_TOP="$T" sh "$W/sync-identity" --reseed -d /dev/null 2>&1)
+ck "reseed -d, no restart" "$(printf '%s\n' "$out" | grep -c "restart ssh")" "0"
+# No booted profile here either (findmnt still fails): a reseed does not need one.
+T="$W/top4"; mkdir -p "$T/boot"; mkkeys "$T/@Desktop/etc/ssh" delta
+FLIPPER_TOP="$T" sh "$W/sync-identity" --reseed >/dev/null 2>&1; ck "reseed empty store exit" "$?" "0"
+ck "reseed empty store" "$(cat "$T/@Desktop/etc/ssh/ssh_host_ed25519_key")" "fresh ed25519 private"
 
 [ "$fail" = 0 ] && echo "all sync-identity checks ok" || echo "FAILURES"
 exit "$fail"

@@ -32,6 +32,8 @@ system reached multi-user, not that nothing failed on the way.
 
 `flipper-sync-identity.service` has to be enabled as well, in every profile, for the profiles to
 present one set of ssh host keys. A profile without it keeps the keys its own first boot made.
+Deleting a profile's keys does not replace them, since the next boot copies the store's back;
+`sync-identity --reseed` generates a new set and gives it to every profile.
 
 ## The tools
 

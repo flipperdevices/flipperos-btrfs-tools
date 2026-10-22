@@ -1,0 +1,23 @@
+[Unit]
+Description=Give this profile the device's ssh host keys
+# Between the two on purpose. After sshd-keygen.service, so a root on its first boot has keys to
+# seed the store with when the store has none, and so keygen never finds ours half written. Before
+# ssh.service, so sshd never starts on the keys this root made for itself and then changes them
+# under a client. A keygen skipped by its condition still counts as having run for the ordering.
+After=sshd-keygen.service
+Before=ssh.service sshd.service
+# The store is on the shared boot subvolume, which every profile mounts from its own fstab.
+RequiresMountsFor=/boot
+# A read-only root has nowhere to put the keys, and that is not a failed boot.
+ConditionPathIsReadWrite=/etc/ssh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The '-' is load-bearing: with systemd-boot-check-no-failures.service enabled a failed unit means
+# the boot is not blessed, and a profile that cannot copy a key still booted. It keeps the keys it
+# has, which is where it was before this unit existed.
+ExecStart=-/usr/local/sbin/sync-identity
+
+[Install]
+WantedBy=multi-user.target

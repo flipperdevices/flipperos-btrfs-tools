@@ -39,7 +39,7 @@ system reached multi-user, not that nothing failed on the way.
 | `send-snapshot`, `receive-snapshot` | zstd-compressed streams between devices |
 | `migrate-profile` | carry a profile's changes onto a newer base |
 | `check-profile` | how far a profile is from its `_stock`: pristine, booted, customized, packages or system |
-| `update-profile` | put a profile on a newer build's `_stock` from the artifact server, keeping its changes |
+| `update-profile` | put a profile, or every one, on a newer build's `_stock` from the artifact server, keeping its changes |
 | `btrfs-maintenance`, `btrfs-show-space` | scrub, dedup, balance, usage |
 | `add-dtbo` | per-profile device-tree overlay drop-ins |
 | `create-swap` | the shared swap file in `@swap`, made when a profile first turns swap on |

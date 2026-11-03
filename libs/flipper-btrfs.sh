@@ -264,6 +264,7 @@ stamp_stock_origin() {
 # migrate-profile does not carry them as one (the identity among them it carries by policy).
 RUNTIME_STATE='^etc/(machine-id|machine-info|hostname|ld\.so\.cache|\.updated)$
 ^etc/kernel/entry-token$
+^etc/modprobe\.d/flipper-wifi-country\.conf$
 ^etc/ssh/(ssh_host_.*|welcome_banner)$
 ^etc/avahi/services(/|$)
 ^var/\.updated$

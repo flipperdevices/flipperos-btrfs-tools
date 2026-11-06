@@ -7,8 +7,9 @@
 # reinstall its own.
 #
 # The build is looked up among the rootfs builds on the artifact server, its Minimal _stock
-# fetched in full and the profile's own as an increment over it, each checked against the build's
-# sha256 before it is received. The profile is then renamed <@profile>-obsolete-<its build>, with a
+# fetched in full and the profile's own as an increment over it, each received as it arrives and
+# checked against the build's sha256 on the way: one that breaks off or does not match is deleted
+# before anything is built from it. The profile is then renamed <@profile>-obsolete-<its build>, with a
 # boot entry of its own, and a snapshot of the new _stock made in its place (create-profile), onto
 # which the user's changes and the device identity are carried (migrate-profile --keep-identity).
 # Should that leave a conflict, or the result not check out, the new one is dropped and the old one
@@ -60,7 +61,6 @@ set -eu
 . /usr/lib/flipper-btrfs.sh
 
 URL="${FLIPPER_UPDATE_URL:-https://dl-linux-images.flipp.dev/rootfs/}"
-CACHE="${FLIPPER_UPDATE_CACHE:-/var/cache/flipper-update}"
 
 usage() {
     cat <<EOF
@@ -465,56 +465,89 @@ need_for "$BUILD" || die "Build $BUILD has no $kind _stock"
 echo "build $BUILD: $URL$bdir"
 echo "to fetch:${need:- nothing}${need:+ ($(human "$bytes"))}"
 
-# A received stream unpacks to a few times its size; ask for four, plus room for the download.
+# A received stream unpacks to a few times its size; ask for four.
 free=$(btrfs filesystem usage -b "$TOP" 2>/dev/null | awk '/Free \(estimated\)/ { print $3; exit }')
-[ -z "$free" ] || [ "$free" -ge $((bytes * 5)) ] \
-    || die "Not enough free space: $(human "$free") free, about $(human $((bytes * 5))) needed"
+[ -z "$free" ] || [ "$free" -ge $((bytes * 4)) ] \
+    || die "Not enough free space: $(human "$free") free, about $(human $((bytes * 4))) needed"
 
 if [ "$DRY" = 1 ]; then
     echo "dry run: would replace $PROFILE with @${kind}_${BUILD}_stock and carry its changes"
     exit 0
 fi
 
-# The download is most of the wait, so it has most of the bar: 0 to 70 by bytes, then 70 to 80
-# receiving, 85 to 95 migrate-profile's own steps, and the steps after it the rest. Everything is
-# fetched before anything is received, so a failed download leaves nothing half received.
-mkdir -p "$CACHE"
-_got=0
-for _f in $need; do
-    _i=$(file_info "$_f")
-    echo "fetching $_f ($(human "${_i%% *}"))..."
-    curl -fL --retry 3 -C - -sS -o "$CACHE/$_f.part" "$URL$bdir$_f" &
-    _cp=$!
-    while kill -0 "$_cp" 2>/dev/null; do
-        _sz=$(stat -c %s "$CACHE/$_f.part" 2>/dev/null || echo 0)
-        progress $(((_got + _sz) * 70 / bytes)) "Downloading images"
-        sleep 1
+# Streams were once fetched whole into this cache first; what an older run left there goes.
+rm -f /var/cache/flipper-update/*_pack.zst /var/cache/flipper-update/*_pack.zst.part
+rmdir /var/cache/flipper-update 2>/dev/null || true
+
+curlrc=$(mktemp)
+copied=$(mktemp)
+state=$(mktemp)
+sums=$(mktemp)
+fetchrc=$(mktemp)
+recvrc=$(mktemp)
+TOP_TMPFILES="$TOP_TMPFILES $curlrc $copied $state $sums $fetchrc $recvrc"
+
+# $1 = url, $2 = size: the file on stdout, a dropped connection picked up where it stopped, up to
+# five attempts in a row that bring nothing. What got through is dd's count rather than curl's,
+# which a curl that is killed never reports. "<bytes before this request> <dd pid>" goes in
+# $state for the bar. 1 when the download gives up, 2 when the receive stopped reading.
+fetch_stream() {
+    _at=0; _miss=0
+    while :; do
+        { curl -fsSL -r "$_at-" "$1"; echo "$?" > "$curlrc"; } | LC_ALL=C dd bs=64K 2> "$copied" &
+        echo "$_at $!" > "$state"
+        wait
+        _rc=$(cat "$curlrc")
+        _n=$(awk '/ bytes / { print $1 }' "$copied")
+        _at=$((_at + ${_n:-0}))
+        echo "$_at" > "$state"
+        [ "$_at" -lt "$2" ] || return 0
+        [ "$_rc" != 23 ] || return 2
+        if [ "${_n:-0}" -gt 0 ]; then _miss=0; else _miss=$((_miss + 1)); fi
+        [ "$_miss" -lt 5 ] || return 1
+        echo "connection lost at $(human "$_at"), resuming..." >&2
+        sleep 3
     done
-    wait "$_cp" || die "Download failed: $_f"
-    if [ "$(sha256sum "$CACHE/$_f.part" | cut -d' ' -f1)" != "${_i#* }" ]; then
-        rm -f "$CACHE/$_f.part"
-        die "Checksum mismatch on $_f; removed, run again to fetch it anew"
-    fi
-    mv "$CACHE/$_f.part" "$CACHE/$_f"
-    _got=$((_got + ${_i%% *}))
-done
-# Each stream goes in through a descriptor of ours, which the receive shares, so how far it has
-# read is that descriptor's position, and /proc says what it is.
+}
+
+# Each stream is received as it downloads, tee handing a copy to sha256sum on fd 4 and the
+# receive writing to our stdout on fd 3. The download is most of the wait, so it has most of the
+# bar: 0 to 80 by bytes, 85 to 95 migrate-profile's own steps, and the steps after it the rest.
+# A stream that breaks off is removed by receive-snapshot, one whose sha256 is wrong here, and
+# the profile is untouched either way: nothing replaces it until every stream is in.
 _done=0
 for _f in $need; do
     _i=$(file_info "$_f")
-    exec 7<"$CACHE/$_f"
-    tool receive-snapshot - <&7 &
-    _rp=$!
-    while kill -0 "$_rp" 2>/dev/null; do
-        _pos=$(awk '$1 == "pos:" { print $2 }' "/proc/$$/fdinfo/7" 2>/dev/null)
-        progress $((70 + (_done + ${_pos:-0}) * 10 / bytes)) "Writing images"
+    _size=${_i%% *}
+    _name=@${_f%_pack.zst}; _name=${_name%_inc}
+    echo "fetching $_f ($(human "$_size"))..."
+    echo "0" > "$state"
+    (
+        {
+            { fetch_stream "$URL$bdir$_f" "$_size" && _r=0 || _r=$?; echo "$_r" > "$fetchrc"; } \
+                | tee /dev/fd/4 \
+                | { tool receive-snapshot - 4>&- >&3 && _r=0 || _r=$?; echo "$_r" > "$recvrc"; }
+        } 4>&1 | sha256sum > "$sums"
+    ) 3>&1 &
+    _pp=$!
+    _at=0; _cp=""
+    while kill -0 "$_pp" 2>/dev/null; do
+        read -r _a _c < "$state" 2>/dev/null && { _at=$_a; _cp=${_c:-}; }
+        _w=$(awk '$1 == "wchar:" { print $2 }' "/proc/${_cp:-0}/io" 2>/dev/null) || _w=0
+        progress $(((_done + _at + ${_w:-0}) * 80 / bytes)) "Downloading images"
         sleep 1
     done
-    wait "$_rp" || { exec 7<&-; die "Receive failed: $_f (kept in $CACHE)"; }
-    exec 7<&-
-    rm -f "$CACHE/$_f"
-    _done=$((_done + ${_i%% *}))
+    wait "$_pp" || true
+    case "$(cat "$fetchrc")" in
+        0|2) ;;
+        *) die "Download failed: $_f" ;;
+    esac
+    [ "$(cat "$recvrc")" = 0 ] || die "Receive failed: $_f"
+    if [ "$(cut -d' ' -f1 "$sums")" != "${_i#* }" ]; then
+        tool delete-snapshot -y "$_name" >/dev/null || echo "Warning: could not delete $_name" >&2
+        die "Checksum mismatch on $_f; $_name deleted, run again to fetch it anew"
+    fi
+    _done=$((_done + _size))
 done
 
 # Stocks of the builds no profile or restore point is built from any more: nothing is reset to

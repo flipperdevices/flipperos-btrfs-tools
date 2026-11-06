@@ -137,7 +137,8 @@ tool() {
 
 manifest=$(mktemp)
 migrc=$(mktemp)
-TOP_TMPFILES="$manifest $migrc"
+_mi=0
+TOP_TMPFILES="$manifest $manifest.list $migrc"
 ROOTDEV=$DEV
 mount_top
 
@@ -221,10 +222,38 @@ build_dirs() {
     [ -n "$_bd" ] || die "Cannot list the builds at $URL"
     printf '%s\n' "$_bd"
 }
-# $1 = build directory -> its manifest in $manifest
-read_manifest() { curl -fsSL "$URL${1}manifest.json" -o "$manifest" 2>/dev/null; }
-# $1 = file name -> its size and sha256 from the manifest, empty if the build has no such file
-file_info() { jq -r --arg f "$1" '.files[] | select(.path == $f) | "\(.size) \(.sha256)"' "$manifest"; }
+# The manifests of the builds named on stdin, fetched at once rather than one by one, each a
+# round trip of its own: "<file> <dir>" a line into $manifest.list, in the order given. One that
+# did not arrive is an empty or missing file.
+fetch_manifests() {
+    set --
+    : > "$manifest.list"
+    while read -r _d; do
+        [ -n "$_d" ] || continue
+        _mi=$((_mi + 1))
+        TOP_TMPFILES="$TOP_TMPFILES $manifest.b$_mi $manifest.b$_mi.files"
+        set -- "$@" -o "$manifest.b$_mi" "$URL${_d}manifest.json"
+        echo "$manifest.b$_mi $_d" >> "$manifest.list"
+    done
+    [ $# = 0 ] || curl -fsSL -Z --parallel-max 30 "$@" 2>/dev/null || true
+}
+# $manifest's build number into _n and the branch of build-scripts it was made from, which is
+# what a channel is, into _branch; its files into $manifest.files, "<path> <size> <sha256>" a
+# line after those two. All with one jq, which takes a while to start.
+read_manifest() {
+    jq -r '.build.number,
+        ([.sourcestamps[]? | select(.codebase == "buildscripts") | .branch][0] // "-"),
+        (.files[] | "\(.path) \(.size) \(.sha256)")' "$manifest" > "$manifest.files" 2>/dev/null \
+        || : > "$manifest.files"
+    { read -r _n; read -r _branch; } < "$manifest.files" || true
+}
+# $1 = file name -> its size and sha256 from read_manifest's list, empty if the build has no
+# such file. The shell's own read, as this is asked often.
+file_info() {
+    while read -r _fp _fs _fh; do
+        [ "$_fp" != "$1" ] || { echo "$_fs $_fh"; return 0; }
+    done < "$manifest.files"
+}
 
 # The files build $1 needs fetched for the kinds of profile after it (default: this profile's),
 # into need. A kind's _stock arrives as an increment over the Minimal one, so Minimal is needed
@@ -252,15 +281,21 @@ need_for() {
 # $1 = percent, $2 = the step under way
 progress() { [ "$PROGRESS" = 0 ] || printf '@progress %s %s\n' "$1" "$2"; }
 
-# The branch of build-scripts the build in $manifest was made from, which is what a channel is.
-branch_of() { jq -r '[.sourcestamps[]? | select(.codebase == "buildscripts") | .branch][0] // "-"' "$manifest"; }
-
-# The directory of build $BUILD into bdir, its manifest into $manifest.
+# The directory of build $BUILD into bdir, its manifest into $manifest, looked for thirty
+# builds at a time.
 find_build() {
     bdir=""
-    for _d in $(build_dirs); do
-        read_manifest "$_d" || continue
-        [ "$(jq -r '.build.number' "$manifest")" = "$BUILD" ] && { bdir=$_d; break; }
+    _left=$(build_dirs)
+    while [ -n "$_left" ] && [ -z "$bdir" ]; do
+        fetch_manifests <<EOF
+$(printf '%s\n' "$_left" | head -n 30)
+EOF
+        _left=$(printf '%s\n' "$_left" | tail -n +31)
+        while read -r _m _d; do
+            [ -s "$_m" ] || continue
+            manifest=$_m; read_manifest
+            [ "$_n" = "$BUILD" ] && { bdir=$_d; break; }
+        done < "$manifest.list"
     done
     [ -n "$bdir" ] || die "No rootfs build $BUILD at $URL"
 }
@@ -332,12 +367,12 @@ EOF
             find_kept
             [ -z "$kept" ] || echo "kept $_kb"
         fi
-        _read=0
-        for _d in $(build_dirs); do
-            [ "$_read" -lt 30 ] || break
-            _read=$((_read + 1))
-            read_manifest "$_d" || continue
-            _n=$(jq -r '.build.number' "$manifest")
+        fetch_manifests <<EOF
+$(build_dirs | head -n 30)
+EOF
+        while read -r manifest _d; do
+            [ -s "$manifest" ] || continue
+            read_manifest
             case "$_n" in ""|*[!0-9]*) continue ;; esac
             _kinds=""
             while read -r _p _k _c _s; do
@@ -350,8 +385,8 @@ EOF
             [ -n "$_kinds" ] || continue
             # shellcheck disable=SC2086 # one kind a word
             need_for "$_n" $_kinds || continue
-            echo "build $_n $(branch_of) $bytes $(printf '%s' "${_kinds# }" | tr ' ' ,)"
-        done
+            echo "build $_n $_branch $bytes $(printf '%s' "${_kinds# }" | tr ' ' ,)"
+        done < "$manifest.list"
         exit 0
     fi
 
@@ -420,17 +455,17 @@ if [ "$LIST" = 1 ]; then
     find_kept
     [ -z "$kept" ] || echo "kept $_kb"
     # The newest builds only, and only those after this one that carry its kind of profile.
-    _read=0
-    for _d in $(build_dirs); do
-        [ "$_read" -lt 30 ] || break
-        _read=$((_read + 1))
-        read_manifest "$_d" || continue
-        _n=$(jq -r '.build.number' "$manifest")
+    fetch_manifests <<EOF
+$(build_dirs | head -n 30)
+EOF
+    while read -r manifest _d; do
+        [ -s "$manifest" ] || continue
+        read_manifest
         case "$_n" in ""|*[!0-9]*) continue ;; esac
         [ "$ALL" = 1 ] || [ "$_n" -gt "$cur" ] || continue
         need_for "$_n" || continue
-        echo "build $_n $(branch_of) $bytes"
-    done
+        echo "build $_n $_branch $bytes"
+    done < "$manifest.list"
     exit 0
 fi
 

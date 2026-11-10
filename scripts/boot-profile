@@ -12,7 +12,8 @@
 # own kernel and an assembled device tree. Which way, and why not the other, is said on
 # stderr and in the kernel log.
 #
-# --dry-run decides and validates without handing over. --no-pivot forces kexec.
+# --dry-run decides and validates without handing over. --no-pivot forces kexec, and so
+# does /etc/no_pivot in the profile, for a profile that needs a real kernel boot.
 # --arm loads the kexec image and stops, so a later boot hands over at once; loading is
 # 2.4s of a 13.8s kexec boot and can happen while the menu is idle. --disarm discards it.
 # shellcheck source-path=SCRIPTDIR
@@ -35,7 +36,8 @@ Usage: boot-profile [--dry-run] [--no-pivot] [-d|--device DEV] <entry|@profile>
   kexec -e without it.
   --dry-run   report the decision and validate it without rebooting: a pivot loads
               nothing, a kexec assembles + loads + unloads its image
-  --no-pivot  never pivot, even where it would work
+  --no-pivot  never pivot, even where it would work. A profile with /etc/no_pivot in it
+              is never pivoted into either
   --arm       load the image this entry would kexec into and stop there, so that a later
               boot of the same entry hands over without loading anything. Nothing to arm
               for a profile that would be pivoted into, and nothing is loaded then
@@ -504,6 +506,8 @@ K="$TOP$K_REL"; I="$TOP$I_REL"
 # so only the arguments in BOOT_ONLY_ARGS are, which a pivot can never give a profile.
 PIVOT_HELPER=/usr/bin/boot-pivot
 PIVOT_REQ=/flipper-pivot
+# In a profile's root, any size: that profile is always kexec'd.
+NO_PIVOT_MARK=/etc/no_pivot
 
 KREL=$(val version)
 # Older entries carry no version line; the kernel path holds it.
@@ -731,6 +735,7 @@ tree_reason() {
 # Why this profile cannot be pivoted into, or nothing when it can.
 pivot_reason() {
     [ "$no_pivot" = 0 ] || { printf '%s' "--no-pivot"; return 0; }
+    [ ! -e "$TOP/$arg$NO_PIVOT_MARK" ] || { printf '%s has %s' "$arg" "$NO_PIVOT_MARK"; return 0; }
     [ -n "$PIVOT_HOW" ] || { printf 'nothing here can hand PID 1 over'; return 0; }
     [ -n "$KREL" ] || { printf 'the entry names no kernel version'; return 0; }
     [ "$KREL" = "$RUNNING" ] \

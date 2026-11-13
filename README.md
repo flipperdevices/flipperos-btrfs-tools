@@ -6,7 +6,7 @@ streams that move them between devices, and the BLS boot entries that make them 
 `scripts/` holds the tools, all POSIX sh, all with `-h/--help`. `libs/` holds the libraries they, the
 hooks and the image build source, plus one awk helper that is read rather than sourced.
 `hooks/` holds the kernel-install plugins that run when a kernel package is installed or removed.
-`systemd/` holds the one unit that has to run inside a booted profile. `tests/` holds shell tests
+`systemd/` holds the units that have to run inside a booted profile. `tests/` holds shell tests
 that need no device.
 
 ## Where the files go on the device
@@ -30,6 +30,11 @@ Two units have to be enabled for boot counting to close its loop:
 spending tries on boots that worked; without the second, "the boot worked" means only that the
 system reached multi-user, not that nothing failed on the way.
 
+`flipper-sync-identity.service` has to be enabled as well, in every profile, for the profiles to
+present one set of ssh host keys. A profile without it keeps the keys its own first boot made.
+Deleting a profile's keys does not replace them, since the next boot copies the store's back;
+`sync-identity --reseed` generates a new set and gives it to every profile.
+
 ## The tools
 
 | | |
@@ -46,6 +51,7 @@ system reached multi-user, not that nothing failed on the way.
 | `set-boot-order` | which profile boots by itself, and which kernel it boots |
 | `boot-profile` | boot an entry now, by kexec or by pivot |
 | `flipper-bless-boot` | run once per good boot, from the unit of the same name |
+| `sync-identity` | one set of ssh host keys for every profile, from a store on the shared `boot` |
 | `apt-backup-profile` | the backup apt offers before it changes packages |
 
 Every tool takes `-d/--device DEV` to operate on a filesystem other than the booted one, which is how

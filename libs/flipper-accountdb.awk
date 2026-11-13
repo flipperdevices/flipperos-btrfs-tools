@@ -4,7 +4,8 @@
 # duplicate: untouched accounts follow the new base, user-added or changed ones ride along from src,
 # memberships are set-merged. LF = field numbers holding member lists (group=4, gshadow=3,4).
 BEGIN { FS=":"; nlf=split(LF,_l,","); for(i=1;i<=nlf;i++) islist[_l[i]+0]=1; fidx=0 }
-FNR==1 { fidx++ }
+# By name, not by count: an empty file has no first line, and the files after it would shift roles.
+FNR==1 { fidx++; while (fidx < ARGC-1 && ARGV[fidx] != FILENAME) fidx++ }
 {
     if ($0=="") next
     k=$1

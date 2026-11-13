@@ -1,0 +1,112 @@
+#!/bin/sh
+# sync-settings [set KEY=VALUE...]: give every profile the device's settings.
+#
+# Each profile is its own root with its own /etc, so a setting made in one profile is missing from
+# every other. Settings that belong to the device, not to the profile, are kept in one file on the
+# shared boot subvolume, and each profile applies them on every boot. A profile made later, from a
+# _stock or a received build, picks them up on its first boot with nothing to push.
+#
+#   (no option)       the booted profile: apply the device's settings. Run on every boot by
+#                     flipper-sync-settings.service, before NetworkManager
+#   set KEY=VALUE...  change the device's settings and apply them to the booted profile now. An
+#                     empty VALUE removes the setting. For onboarding to call when it finishes
+#
+# Settings:
+#   wifi_country  ISO 3166 alpha-2 code (DE, US) or 00 for the world domain. Sets the radio's
+#                 regulatory domain, which decides the channels and power it may use: a 5 GHz AP
+#                 does not come up under the world domain the kernel starts with
+#
+# The file holds no secrets: anyone who can read /boot may read it. It is read as KEY=VALUE lines,
+# never sourced, since every profile acts on what any one of them wrote.
+set -eu
+
+STORE="${FLIPPER_SETTINGS:-/boot/flipper-settings}"
+ETC="${FLIPPER_ETC:-/etc}"
+SYS="${FLIPPER_SYS:-/sys}"
+WIFI_CONF="$ETC/modprobe.d/flipper-wifi-country.conf"
+
+usage() {
+    cat <<EOF
+Usage: sync-settings [set KEY=VALUE...]
+  set KEY=VALUE  change a device setting and apply it now; an empty VALUE removes it
+  With no option: apply the device's settings to the booted profile.
+Settings:
+  wifi_country   ISO 3166 alpha-2 code (DE, US), or 00 for the world domain
+Stored in $STORE.
+EOF
+}
+
+# The value of setting $1 in the store, empty when it is not set. The last line wins.
+get() { sed -n "s/^$1=//p" "$STORE" 2>/dev/null | tail -n1; }
+
+# Prints value $2 of setting $1 the way it is stored, or fails if the setting does not take it.
+normalize() {
+    case "$1" in
+        wifi_country)
+            _v=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')
+            case "$_v" in ""|00|[A-Z][A-Z]) printf '%s' "$_v" ;; *) return 1 ;; esac ;;
+        *) return 1 ;;
+    esac
+}
+
+# Writes $2 to file $1 by way of a temporary name, so a reset leaves the old file or the new one.
+put_file() {
+    if ! { printf '%s' "$2" > "$1.sync.$$" && mv -f "$1.sync.$$" "$1"; }; then
+        rm -f "$1.sync.$$"; return 1
+    fi
+}
+
+# The regulatory domain. cfg80211 reads its option only when it loads, and the radio usually loads
+# it before this runs, so a domain that changed is also handed to the running kernel.
+apply_wifi_country() {
+    _cc=$(get wifi_country)
+    if [ -z "$_cc" ]; then
+        [ -e "$WIFI_CONF" ] || return 0
+        rm -f "$WIFI_CONF"
+        _cc=00
+    else
+        _raw=$_cc
+        _cc=$(normalize wifi_country "$_raw") || {
+            echo "sync-settings: ignoring wifi_country=$_raw in $STORE: not a country code" >&2; return 1; }
+        _want="options cfg80211 ieee80211_regdom=$_cc"
+        [ "$(cat "$WIFI_CONF" 2>/dev/null)" != "$_want" ] || return 0
+        mkdir -p "${WIFI_CONF%/*}"
+        put_file "$WIFI_CONF" "$_want
+" || return 1
+    fi
+    echo "sync-settings: Wi-Fi country is $_cc"
+    [ -d "$SYS/module/cfg80211" ] || return 0
+    iw reg set "$_cc" || { echo "sync-settings: iw reg set $_cc failed, it applies from the next boot" >&2; return 1; }
+}
+
+apply() {
+    _rc=0
+    apply_wifi_country || _rc=1
+    return "$_rc"
+}
+
+# Sets each KEY=VALUE in the store, in one rename: a store that exists is a store that is complete.
+set_settings() {
+    [ $# -gt 0 ] || { usage >&2; exit 1; }
+    _new=$(cat "$STORE" 2>/dev/null || true)
+    for _kv in "$@"; do
+        case "$_kv" in *=*) ;; *) echo "Error: expected KEY=VALUE: $_kv" >&2; exit 1 ;; esac
+        _k=${_kv%%=*}
+        _v=$(normalize "$_k" "${_kv#*=}") || { echo "Error: not a valid setting: $_kv" >&2; usage >&2; exit 1; }
+        _new=$(printf '%s\n' "$_new" | grep -v "^$_k=" || true)
+        [ -z "$_v" ] || _new="$_new
+$_k=$_v"
+    done
+    _new=$(printf '%s\n' "$_new" | sed '/^$/d')
+    put_file "$STORE" "${_new:+$_new
+}"
+    # A rename reaches the disk with the next btrfs commit; lost, the next boot applies the old one.
+    sync
+}
+
+case "${1:-}" in
+    "")        apply ;;
+    set)       shift; set_settings "$@"; apply ;;
+    -h|--help) usage ;;
+    *)         echo "Error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
+esac

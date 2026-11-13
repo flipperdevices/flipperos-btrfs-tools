@@ -1,0 +1,19 @@
+[Unit]
+Description=Give this profile the device's settings
+# Before NetworkManager, so the radio joins or starts an AP in the device's country and not in the
+# world domain, where a 5 GHz AP does not come up at all.
+Before=NetworkManager.service
+# The settings are on the shared boot subvolume, which every profile mounts from its own fstab.
+RequiresMountsFor=/boot
+# A read-only root has nowhere to put them, and that is not a failed boot.
+ConditionPathIsReadWrite=/etc
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The '-' keeps a setting that cannot be applied from failing the boot, which with
+# systemd-boot-check-no-failures.service enabled would leave the entry unblessed.
+ExecStart=-/usr/local/sbin/sync-settings
+
+[Install]
+WantedBy=multi-user.target

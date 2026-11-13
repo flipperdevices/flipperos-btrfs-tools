@@ -6,7 +6,7 @@ streams that move them between devices, and the BLS boot entries that make them 
 `scripts/` holds the tools, all POSIX sh, all with `-h/--help`. `libs/` holds the libraries they, the
 hooks and the image build source, plus one awk helper that is read rather than sourced.
 `hooks/` holds the kernel-install plugins that run when a kernel package is installed or removed.
-`systemd/` holds the one unit that has to run inside a booted profile. `tests/` holds shell tests
+`systemd/` holds the units that have to run inside a booted profile. `tests/` holds shell tests
 that need no device.
 
 ## Where the files go on the device
@@ -30,6 +30,10 @@ Two units have to be enabled for boot counting to close its loop:
 spending tries on boots that worked; without the second, "the boot worked" means only that the
 system reached multi-user, not that nothing failed on the way.
 
+`flipper-sync-settings.service` has to be enabled for the device's settings to reach each profile.
+Without it a setting made with `sync-settings set` applies to the profile it was made in, and no
+other.
+
 ## The tools
 
 | | |
@@ -46,11 +50,13 @@ system reached multi-user, not that nothing failed on the way.
 | `set-boot-order` | which profile boots by itself, and which kernel it boots |
 | `boot-profile` | boot an entry now, by kexec or by pivot |
 | `flipper-bless-boot` | run once per good boot, from the unit of the same name |
+| `sync-settings` | the device's settings (the Wi-Fi country), kept on the shared `boot` subvolume and applied in every profile on every boot |
 | `apt-backup-profile` | the backup apt offers before it changes packages |
 
 Every tool takes `-d/--device DEV` to operate on a filesystem other than the booted one, which is how
 they are used from a recovery boot. `apt-backup-profile` is the exception: it backs up the profile
-the running apt is about to change, which is always the booted one.
+the running apt is about to change, which is always the booted one. So is `sync-settings`: it
+applies to the booted profile, and the other profiles read the same file when they boot.
 
 ## Relationship to flipperone-linux-build-scripts
 

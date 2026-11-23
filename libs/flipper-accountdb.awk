@@ -2,7 +2,8 @@
 #   awk -v LF=<list-fields> -f this base ours theirs
 # Keyed by the first field, not by line order, so an epoch bump cannot conflict and entries cannot
 # duplicate: untouched accounts follow the new base, user-added or changed ones ride along from src,
-# memberships are set-merged. LF = field numbers holding member lists (group=4, gshadow=3,4).
+# user-deleted ones stay deleted, memberships are set-merged.
+# LF = field numbers holding member lists (group=4, gshadow=3,4).
 BEGIN { FS=":"; nlf=split(LF,_l,","); for(i=1;i<=nlf;i++) islist[_l[i]+0]=1; fidx=0 }
 # By name, not by count: an empty file has no first line, and the files after it would shift roles.
 FNR==1 { fidx++; while (fidx < ARGC-1 && ARGV[fidx] != FILENAME) fidx++ }
@@ -21,13 +22,11 @@ function put(k,   line) { line=decide(k); if (line!="") print line }
 function decide(k,   ib,io,it) {
     ib=(k in hB); io=(k in hO); it=(k in hT)
     if (!io && !it) return ""
-    if ( io && !it) { if (ib && Ol[k]==Bl[k]) return ""; return Ol[k] }
+    # A deletion in src wins even over a base change: chpasswd re-salts every factory hash per build.
+    if ( io && !it) { if (ib) return ""; return Ol[k] }
     if (!io &&  it) { if (ib && Tl[k]==Bl[k]) return ""; return Tl[k] }
     if (LF!="") return mergerec(k, ib)
-    if (Ol[k]==Tl[k]) return Ol[k]
-    if (!ib)          return Ol[k]
-    if (Tl[k]==Bl[k]) return Ol[k]
-    if (Ol[k]==Bl[k]) return Tl[k]
+    if (ib && Tl[k]==Bl[k]) return Ol[k]
     return Tl[k]
 }
 function mergerec(k, ib,   nb,no2,nt2,fb,fo,ft,fi,res) {
@@ -35,7 +34,8 @@ function mergerec(k, ib,   nb,no2,nt2,fb,fo,ft,fi,res) {
     no2 =      split(Ol[k], fo, ":")
     nt2 =      split(Tl[k], ft, ":")
     for (fi=1; fi<=no2; fi++)
-        rf[fi] = (fi in islist) ? merge_members(fi, ib, fb, fo, ft, nb, no2, nt2) : fo[fi]
+        rf[fi] = (fi in islist) ? merge_members(fi, ib, fb, fo, ft, nb, no2, nt2) : \
+                 (fi > nt2 || (ib && ft[fi]==fb[fi])) ? fo[fi] : ft[fi]
     res=rf[1]; for(fi=2;fi<=no2;fi++) res=res ":" rf[fi]
     delete rf
     return res
